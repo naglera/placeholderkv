@@ -7,7 +7,7 @@ start_server {tags {"introspection"}} {
 
     test {CLIENT LIST} {
         r client list
-    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|list user=* redir=-1 resp=*}
+    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|list user=* redir=-1 resp=*}
 
     test {CLIENT LIST with IDs} {
         set myid [r client id]
@@ -17,7 +17,7 @@ start_server {tags {"introspection"}} {
 
     test {CLIENT INFO} {
         r client info
-    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|info user=* redir=-1 resp=*}
+    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|info user=* redir=-1 resp=*}
 
     test {CLIENT KILL with illegal arguments} {
         assert_error "ERR wrong number of arguments for 'client|kill' command" {r client kill}
@@ -32,7 +32,51 @@ start_server {tags {"introspection"}} {
         assert_error "ERR No such user*" {r client kill user wrong_user}
 
         assert_error "ERR syntax error*" {r client kill skipme yes_or_no}
+
+        assert_error "ERR *not an integer or out of range*" {r client kill maxage str}
+        assert_error "ERR *not an integer or out of range*" {r client kill maxage 9999999999999999999}
+        assert_error "ERR *greater than 0*" {r client kill maxage -1}
     }
+
+    test {CLIENT KILL maxAGE will kill old clients} {
+        # This test is very likely to do a false positive if the execute time
+        # takes longer than the max age, so give it a few more chances. Go with
+        # 3 retries of increasing sleep_time, i.e. start with 2s, then go 4s, 8s.
+        set sleep_time 2
+        for {set i 0} {$i < 3} {incr i} {
+            set rd1 [redis_deferring_client]
+            r debug sleep $sleep_time
+            set rd2 [redis_deferring_client]
+            r acl setuser dummy on nopass +ping
+            $rd1 auth dummy ""
+            $rd1 read
+            $rd2 auth dummy ""
+            $rd2 read
+
+            # Should kill rd1 but not rd2
+            set max_age [expr $sleep_time / 2]
+            set res [r client kill user dummy maxage $max_age]
+            if {$res == 1} {
+                break
+            } else {
+                # Clean up and try again next time
+                set sleep_time [expr $sleep_time * 2]
+                $rd1 close
+                $rd2 close
+            }
+
+        } ;# for
+
+        if {$::verbose} { puts "CLIENT KILL maxAGE will kill old clients test attempts: $i" }
+        assert_equal $res 1
+
+        # rd2 should still be connected
+        $rd2 ping
+        assert_equal "PONG" [$rd2 read]
+
+        $rd1 close
+        $rd2 close
+    } {0} {"needs:debug"}
 
     test {CLIENT KILL SKIPME YES/NO will kill all clients} {
         # Kill all clients except `me`
@@ -59,6 +103,29 @@ start_server {tags {"introspection"}} {
         $rd2 close
         $rd3 close
         $rd4 close
+    }
+
+    test {CLIENT command unhappy path coverage} {
+        assert_error "ERR*wrong number of arguments*" {r client caching}
+        assert_error "ERR*when the client is in tracking mode*" {r client caching maybe}
+        assert_error "ERR*syntax*" {r client no-evict wrongInput}
+        assert_error "ERR*syntax*" {r client reply wrongInput}
+        assert_error "ERR*syntax*" {r client tracking wrongInput}
+        assert_error "ERR*syntax*" {r client tracking on wrongInput}
+        assert_error "ERR*when the client is in tracking mode*" {r client caching off}
+        assert_error "ERR*when the client is in tracking mode*" {r client caching on}
+
+        r CLIENT TRACKING ON optout
+        assert_error "ERR*syntax*" {r client caching on}
+
+        r CLIENT TRACKING off optout
+        assert_error "ERR*when the client is in tracking mode*" {r client caching on}
+
+        assert_error "ERR*No such*" {r client kill 000.123.321.567:0000}
+        assert_error "ERR*No such*" {r client kill 127.0.0.1:}
+
+        assert_error "ERR*timeout is not an integer*" {r client pause abc}
+        assert_error "ERR timeout is negative" {r client pause -1}
     }
 
     test "CLIENT KILL close the client connection during bgsave" {
@@ -271,30 +338,14 @@ start_server {tags {"introspection"}} {
         r client getname
     } {}
 
+    test {CLIENT GETNAME check if name set correctly} {
+        r client setname testName
+        r client getName
+    } {testName}
+
     test {CLIENT LIST shows empty fields for unassigned names} {
         r client list
     } {*name= *}
-
-    test {Coverage: Basic CLIENT CACHING} {
-        set rd_redirection [redis_deferring_client]
-        $rd_redirection client id
-        set redir_id [$rd_redirection read]
-        r CLIENT TRACKING on OPTIN REDIRECT $redir_id
-        r CLIENT CACHING yes
-        r CLIENT TRACKING off
-    } {OK}
-
-    test {Coverage: Basic CLIENT REPLY} {
-        r CLIENT REPLY on
-    } {OK}
-
-    test {Coverage: Basic CLIENT TRACKINGINFO} {
-        r CLIENT TRACKINGINFO
-    } {flags off redirect -1 prefixes {}}
-
-    test {Coverage: Basic CLIENT GETREDIR} {
-        r CLIENT GETREDIR
-    } {-1}
 
     test {CLIENT SETNAME does not accept spaces} {
         catch {r client setname "foo bar"} e
@@ -400,6 +451,10 @@ start_server {tags {"introspection"}} {
             replicaof
             slaveof
             requirepass
+            server-cpulist
+            bio-cpulist
+            aof-rewrite-cpulist
+            bgsave-cpulist
             server_cpulist
             bio_cpulist
             aof_rewrite_cpulist
@@ -651,53 +706,57 @@ start_server {tags {"introspection"}} {
         assert {[dict exists $res bind]}  
     }
 
-    test {redis-server command line arguments - error cases} {
-        catch {exec src/redis-server --port} err
+    test {valkey-server command line arguments - error cases} {
+        # Take '--invalid' as the option.
+        catch {exec src/valkey-server --invalid} err
+        assert_match {*Bad directive or wrong number of arguments*} $err
+
+        catch {exec src/valkey-server --port} err
         assert_match {*'port'*wrong number of arguments*} $err
 
-        catch {exec src/redis-server --port 6380 --loglevel} err
+        catch {exec src/valkey-server --port 6380 --loglevel} err
         assert_match {*'loglevel'*wrong number of arguments*} $err
 
         # Take `6379` and `6380` as the port option value.
-        catch {exec src/redis-server --port 6379 6380} err
+        catch {exec src/valkey-server --port 6379 6380} err
         assert_match {*'port "6379" "6380"'*wrong number of arguments*} $err
 
         # Take `--loglevel` and `verbose` as the port option value.
-        catch {exec src/redis-server --port --loglevel verbose} err
+        catch {exec src/valkey-server --port --loglevel verbose} err
         assert_match {*'port "--loglevel" "verbose"'*wrong number of arguments*} $err
 
         # Take `--bla` as the port option value.
-        catch {exec src/redis-server --port --bla --loglevel verbose} err
+        catch {exec src/valkey-server --port --bla --loglevel verbose} err
         assert_match {*'port "--bla"'*argument couldn't be parsed into an integer*} $err
 
         # Take `--bla` as the loglevel option value.
-        catch {exec src/redis-server --logfile --my--log--file --loglevel --bla} err
+        catch {exec src/valkey-server --logfile --my--log--file --loglevel --bla} err
         assert_match {*'loglevel "--bla"'*argument(s) must be one of the following*} $err
 
         # Using MULTI_ARG's own check, empty option value
-        catch {exec src/redis-server --shutdown-on-sigint} err
+        catch {exec src/valkey-server --shutdown-on-sigint} err
         assert_match {*'shutdown-on-sigint'*argument(s) must be one of the following*} $err
-        catch {exec src/redis-server --shutdown-on-sigint "now force" --shutdown-on-sigterm} err
+        catch {exec src/valkey-server --shutdown-on-sigint "now force" --shutdown-on-sigterm} err
         assert_match {*'shutdown-on-sigterm'*argument(s) must be one of the following*} $err
 
         # Something like `redis-server --some-config --config-value1 --config-value2 --loglevel debug` would break,
         # because if you want to pass a value to a config starting with `--`, it can only be a single value.
-        catch {exec src/redis-server --replicaof 127.0.0.1 abc} err
+        catch {exec src/valkey-server --replicaof 127.0.0.1 abc} err
         assert_match {*'replicaof "127.0.0.1" "abc"'*Invalid master port*} $err
-        catch {exec src/redis-server --replicaof --127.0.0.1 abc} err
+        catch {exec src/valkey-server --replicaof --127.0.0.1 abc} err
         assert_match {*'replicaof "--127.0.0.1" "abc"'*Invalid master port*} $err
-        catch {exec src/redis-server --replicaof --127.0.0.1 --abc} err
+        catch {exec src/valkey-server --replicaof --127.0.0.1 --abc} err
         assert_match {*'replicaof "--127.0.0.1"'*wrong number of arguments*} $err
     } {} {external:skip}
 
-    test {redis-server command line arguments - allow passing option name and option value in the same arg} {
+    test {valkey-server command line arguments - allow passing option name and option value in the same arg} {
         start_server {config "default.conf" args {"--maxmemory 700mb" "--maxmemory-policy volatile-lru"}} {
             assert_match [r config get maxmemory] {maxmemory 734003200}
             assert_match [r config get maxmemory-policy] {maxmemory-policy volatile-lru}
         }
     } {} {external:skip}
 
-    test {redis-server command line arguments - wrong usage that we support anyway} {
+    test {valkey-server command line arguments - wrong usage that we support anyway} {
         start_server {config "default.conf" args {loglevel verbose "--maxmemory '700mb'" "--maxmemory-policy 'volatile-lru'"}} {
             assert_match [r config get loglevel] {loglevel verbose}
             assert_match [r config get maxmemory] {maxmemory 734003200}
@@ -705,21 +764,21 @@ start_server {tags {"introspection"}} {
         }
     } {} {external:skip}
 
-    test {redis-server command line arguments - allow option value to use the `--` prefix} {
+    test {valkey-server command line arguments - allow option value to use the `--` prefix} {
         start_server {config "default.conf" args {--proc-title-template --my--title--template --loglevel verbose}} {
             assert_match [r config get proc-title-template] {proc-title-template --my--title--template}
             assert_match [r config get loglevel] {loglevel verbose}
         }
     } {} {external:skip}
 
-    test {redis-server command line arguments - option name and option value in the same arg and `--` prefix} {
+    test {valkey-server command line arguments - option name and option value in the same arg and `--` prefix} {
         start_server {config "default.conf" args {"--proc-title-template --my--title--template" "--loglevel verbose"}} {
             assert_match [r config get proc-title-template] {proc-title-template --my--title--template}
             assert_match [r config get loglevel] {loglevel verbose}
         }
     } {} {external:skip}
 
-    test {redis-server command line arguments - save with empty input} {
+    test {valkey-server command line arguments - save with empty input} {
         start_server {config "default.conf" args {--save --loglevel verbose}} {
             assert_match [r config get save] {save {}}
             assert_match [r config get loglevel] {loglevel verbose}
@@ -748,7 +807,7 @@ start_server {tags {"introspection"}} {
 
     } {} {external:skip}
 
-    test {redis-server command line arguments - take one bulk string with spaces for MULTI_ARG configs parsing} {
+    test {valkey-server command line arguments - take one bulk string with spaces for MULTI_ARG configs parsing} {
         start_server {config "default.conf" args {--shutdown-on-sigint nosave force now --shutdown-on-sigterm "nosave force"}} {
             assert_match [r config get shutdown-on-sigint] {shutdown-on-sigint {nosave now force}}
             assert_match [r config get shutdown-on-sigterm] {shutdown-on-sigterm {nosave force}}

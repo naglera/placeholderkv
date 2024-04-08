@@ -14,9 +14,13 @@
             "STALE",
             "SENTINEL"
         ],
+        "command_tips": [
+          "REQUEST_POLICY:ALL_NODES",
+          "RESPONSE_POLICY:ALL_SUCCEEDED"
+        ],        
         "reply_schema": {
             "type": "integer",
-            "description": "The number of users that were deleted"
+            "description": "The number of users that were deleted."
         },
         "arguments": [
             {

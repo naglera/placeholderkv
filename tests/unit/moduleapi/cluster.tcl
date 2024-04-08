@@ -43,7 +43,7 @@ start_cluster 3 0 [list config_lines $modules] {
 
 
     test "Perform a Resharding" {
-        exec src/redis-cli --cluster-yes --cluster reshard 127.0.0.1:[srv -2 port] \
+        exec src/valkey-cli --cluster-yes --cluster reshard 127.0.0.1:[srv -2 port] \
                            --cluster-to [$node1 cluster myid] \
                            --cluster-from [$node3 cluster myid] \
                            --cluster-slots 1
@@ -69,9 +69,9 @@ start_cluster 3 0 [list config_lines $modules] {
 
     test "Wait for cluster to be stable" {
         wait_for_condition 1000 50 {
-            [catch {exec src/redis-cli --cluster check 127.0.0.1:[srv 0 port]}] == 0 &&
-            [catch {exec src/redis-cli --cluster check 127.0.0.1:[srv -1 port]}] == 0 &&
-            [catch {exec src/redis-cli --cluster check 127.0.0.1:[srv -2 port]}] == 0 &&
+            [catch {exec src/valkey-cli --cluster check 127.0.0.1:[srv 0 port]}] == 0 &&
+            [catch {exec src/valkey-cli --cluster check 127.0.0.1:[srv -1 port]}] == 0 &&
+            [catch {exec src/valkey-cli --cluster check 127.0.0.1:[srv -2 port]}] == 0 &&
             [CI 0 cluster_state] eq {ok} &&
             [CI 1 cluster_state] eq {ok} &&
             [CI 2 cluster_state] eq {ok}
@@ -163,21 +163,23 @@ start_cluster 3 0 [list config_lines $modules] {
     $node2_rd close
 }
 
-set modules [list loadmodule [file normalize tests/modules/keyspace_events.so]]
+set testmodule_keyspace_events [file normalize tests/modules/keyspace_events.so]
+set testmodule_postnotifications "[file normalize tests/modules/postnotifications.so] with_key_events"
+set modules [list loadmodule $testmodule_keyspace_events loadmodule $testmodule_postnotifications]
 start_cluster 2 2 [list config_lines $modules] {
 
     set master1 [srv 0 client]
     set master2 [srv -1 client]
     set replica1 [srv -2 client]
     set replica2 [srv -3 client]
-    
+
     test "Verify keys deletion and notification effects happened on cluster slots change are replicated inside multi exec" {
         $master2 set count_dels_{4oi} 1
         $master2 del count_dels_{4oi}
         assert_equal 1 [$master2 keyspace.get_dels]
         assert_equal 1 [$replica2 keyspace.get_dels]
         $master2 set count_dels_{4oi} 1
-        
+
         set repl [attach_to_replication_stream_on_connection -3]
 
         $master1 cluster bumpepoch
@@ -195,10 +197,12 @@ start_cluster 2 2 [list config_lines $modules] {
             fail "replica did not increase del counter"
         }
 
+        # the {lpush before_deleted count_dels_{4oi}} is a post notification job registered when 'count_dels_{4oi}' was removed
         assert_replication_stream $repl {
             {multi}
             {del count_dels_{4oi}}
             {keyspace.incr_dels}
+            {lpush before_deleted count_dels_{4oi}}
             {exec}
         }
         close_replication_stream $repl

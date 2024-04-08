@@ -51,7 +51,6 @@
 #define REGISTRY_LOAD_CTX_NAME "__LIBRARY_CTX__"
 #define LIBRARY_API_NAME "__LIBRARY_API__"
 #define GLOBALS_API_NAME "__GLOBALS_API__"
-#define LOAD_TIMEOUT_MS 500
 
 /* Lua engine ctx */
 typedef struct luaEngineCtx {
@@ -67,6 +66,7 @@ typedef struct luaFunctionCtx {
 typedef struct loadCtx {
     functionLibInfo *li;
     monotime start_time;
+    size_t timeout;
 } loadCtx;
 
 typedef struct registerFunctionArgs {
@@ -85,7 +85,7 @@ static void luaEngineLoadHook(lua_State *lua, lua_Debug *ar) {
     loadCtx *load_ctx = luaGetFromRegistry(lua, REGISTRY_LOAD_CTX_NAME);
     serverAssert(load_ctx); /* Only supported inside script invocation */
     uint64_t duration = elapsedMs(load_ctx->start_time);
-    if (duration > LOAD_TIMEOUT_MS) {
+    if (load_ctx->timeout > 0 && duration > load_ctx->timeout) {
         lua_sethook(lua, luaEngineLoadHook, LUA_MASKLINE, 0);
 
         luaPushError(lua,"FUNCTION LOAD timeout");
@@ -100,7 +100,7 @@ static void luaEngineLoadHook(lua_State *lua, lua_Debug *ar) {
  *
  * Return NULL on compilation error and set the error to the err variable
  */
-static int luaEngineCreate(void *engine_ctx, functionLibInfo *li, sds blob, sds *err) {
+static int luaEngineCreate(void *engine_ctx, functionLibInfo *li, sds blob, size_t timeout, sds *err) {
     int ret = C_ERR;
     luaEngineCtx *lua_engine_ctx = engine_ctx;
     lua_State *lua = lua_engine_ctx->lua;
@@ -124,6 +124,7 @@ static int luaEngineCreate(void *engine_ctx, functionLibInfo *li, sds blob, sds 
     loadCtx load_ctx = {
         .li = li,
         .start_time = getMonotonicUs(),
+        .timeout = timeout,
     };
     luaSaveOnRegistry(lua, REGISTRY_LOAD_CTX_NAME, &load_ctx);
 
@@ -353,7 +354,6 @@ error:
 static int luaRegisterFunctionReadPositionalArgs(lua_State *lua, registerFunctionArgs *register_f_args) {
     char *err = NULL;
     sds name = NULL;
-    sds desc = NULL;
     luaFunctionCtx *lua_f_ctx = NULL;
     if (!(name = luaGetStringSds(lua, 1))) {
         err = "first argument to redis.register_function must be a string";
@@ -376,7 +376,6 @@ static int luaRegisterFunctionReadPositionalArgs(lua_State *lua, registerFunctio
 
 error:
     if (name) sdsfree(name);
-    if (desc) sdsfree(desc);
     luaPushError(lua, err);
     return C_ERR;
 }
@@ -438,6 +437,11 @@ int luaEngineInitEngine(void) {
     luaRegisterVersion(lua_engine_ctx->lua);
 
     luaSetErrorMetatable(lua_engine_ctx->lua);
+    lua_setfield(lua_engine_ctx->lua, -2, SERVER_API_NAME);
+
+    /* Get the server object and also set it to the Redis API
+     * compatibility namespace. */
+    lua_getfield(lua_engine_ctx->lua, -1, SERVER_API_NAME);
     lua_setfield(lua_engine_ctx->lua, -2, REDIS_API_NAME);
 
     luaSetErrorMetatable(lua_engine_ctx->lua);

@@ -64,7 +64,8 @@ start_server {tags {"scripting"}} {
     } {hello1}
 
     test {FUNCTION - test replace argument with failure keeps old libraries} {
-         catch {r function create LUA test REPLACE {error}}
+        catch {r function load REPLACE [get_function_code LUA test test {error}]} e
+        assert_match {ERR Error compiling function*} $e
         r fcall test 0
     } {hello1}
 
@@ -1105,7 +1106,7 @@ start_server {tags {"scripting"}} {
         set _ {}
     } {} {external:skip}
 
-    test {FUNCTION - redis version api} {
+    test {FUNCTION - valkey version api} {
         r FUNCTION load replace {#!lua name=test
             local version = redis.REDIS_VERSION_NUM
 

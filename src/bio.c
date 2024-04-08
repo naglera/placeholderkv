@@ -142,7 +142,7 @@ void bioInit(void) {
     for (j = 0; j < BIO_WORKER_NUM; j++) {
         void *arg = (void*)(unsigned long) j;
         if (pthread_create(&thread,&attr,bioProcessBackgroundJobs,arg) != 0) {
-            serverLog(LL_WARNING,"Fatal: Can't initialize Background Jobs.");
+            serverLog(LL_WARNING, "Fatal: Can't initialize Background Jobs. Error message: %s", strerror(errno));
             exit(1);
         }
         bio_threads[j] = thread;
@@ -212,7 +212,7 @@ void *bioProcessBackgroundJobs(void *arg) {
 
     redis_set_thread_title(bio_worker_title[worker]);
 
-    redisSetCpuAffinity(server.bio_cpulist);
+    serverSetCpuAffinity(server.bio_cpulist);
 
     makeThreadKillable();
 

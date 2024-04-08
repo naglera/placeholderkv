@@ -323,6 +323,23 @@ start_server {tags {"acl external:skip"}} {
         $rd close
     } {0}
 
+    test {blocked command gets rejected when reprocessed after permission change} {
+        r auth default ""
+        r config resetstat
+        set rd [redis_deferring_client]
+        r ACL setuser psuser reset on nopass +@all allkeys
+        $rd AUTH psuser pspass
+        $rd read
+        $rd BLPOP list1 0
+        wait_for_blocked_client
+        r ACL setuser psuser resetkeys
+        r LPUSH list1 foo
+        assert_error {*NOPERM No permissions to access a key*} {$rd read}
+        $rd ping
+        $rd close
+        assert_match {*calls=0,usec=0,*,rejected_calls=1,failed_calls=0} [cmdrstat blpop r]
+    }
+
     test {Users can be configured to authenticate with any password} {
         r ACL setuser newuser nopass
         r AUTH newuser zipzapblabla
@@ -595,9 +612,13 @@ start_server {tags {"acl external:skip"}} {
         r ACL SETUSER adv-test -@all +select|0 +select|0 +debug|segfault +debug
         assert_equal "-@all +select|0 +debug" [dict get [r ACL getuser adv-test] commands]
 
-        # Unnecessary categories are retained for potentional future compatibility
+        # Unnecessary categories are retained for potential future compatibility
         r ACL SETUSER adv-test -@all -@dangerous
         assert_equal "-@all -@dangerous" [dict get [r ACL getuser adv-test] commands]
+
+        # Duplicate categories are compressed, regression test for #12470
+        r ACL SETUSER adv-test -@all +config +config|get -config|set +config
+        assert_equal "-@all +config" [dict get [r ACL getuser adv-test] commands]
     }
 
     test "ACL CAT with illegal arguments" {
@@ -645,16 +666,16 @@ start_server {tags {"acl external:skip"}} {
          for {set j 0} {$j < 10} {incr j} {
              assert_error "*WRONGPASS*" {r AUTH user1 doo}
          }
-         set entry_id_lastest_error [dict get [lindex [r ACL LOG] 0] entry-id]
+         set entry_id_latest_error [dict get [lindex [r ACL LOG] 0] entry-id]
          set timestamp_created_updated [dict get [lindex [r ACL LOG] 0] timestamp-created]
          set timestamp_last_updated_after_update [dict get [lindex [r ACL LOG] 0] timestamp-last-updated]
-         assert {$entry_id_lastest_error eq $entry_id_initial_error}
+         assert {$entry_id_latest_error eq $entry_id_initial_error}
          assert {$timestamp_last_update_original < $timestamp_last_updated_after_update}
          assert {$timestamp_created_original eq $timestamp_created_updated}
          r ACL setuser user2 >doo
          assert_error "*WRONGPASS*" {r AUTH user2 foo}
          set new_error_entry_id [dict get [lindex [r ACL LOG] 0] entry-id]
-         assert {$new_error_entry_id eq $entry_id_lastest_error + 1 }
+         assert {$new_error_entry_id eq $entry_id_latest_error + 1 }
     }
 
     test {ACL LOG shows failed command executions at toplevel} {
@@ -781,6 +802,16 @@ start_server {tags {"acl external:skip"}} {
         assert {[dict get $entry username] eq {antirez}}
     }
 
+    test {ACLLOG - zero max length is correctly handled} {
+        r ACL LOG RESET
+        r CONFIG SET acllog-max-len 0
+        for {set j 0} {$j < 10} {incr j} {
+            catch {r SET obj:$j 123}
+        }
+        r AUTH default ""
+        assert {[llength [r ACL LOG]] == 0}
+    }
+
     test {ACL LOG entries are limited to a maximum amount} {
         r ACL LOG RESET
         r CONFIG SET acllog-max-len 5
@@ -789,6 +820,11 @@ start_server {tags {"acl external:skip"}} {
             catch {r SET obj:$j 123}
         }
         r AUTH default ""
+        assert {[llength [r ACL LOG]] == 5}
+    }
+
+    test {ACL LOG entries are still present on update of max len config} {
+        r CONFIG SET acllog-max-len 0
         assert {[llength [r ACL LOG]] == 5}
     }
 
@@ -984,16 +1020,76 @@ start_server [list overrides [list "dir" $server_path "acl-pubsub-default" "allc
         set e
     } {*NOPERM*set*}
 
+    test {ACL LOAD only disconnects affected clients} {
+        reconnect
+        r ACL SETUSER doug on nopass resetchannels &test* +@all ~*
+
+        set rd1 [redis_deferring_client]
+        set rd2 [redis_deferring_client]
+
+        $rd1 AUTH alice alice
+        $rd1 read
+        $rd1 SUBSCRIBE test1
+        $rd1 read
+
+        $rd2 AUTH doug doug
+        $rd2 read
+        $rd2 SUBSCRIBE test1
+        $rd2 read
+
+        r ACL LOAD
+        r PUBLISH test1 test-message
+
+        # Permissions for 'alice' haven't changed, so they should still be connected
+        assert_match {*test-message*} [$rd1 read]
+
+        # 'doug' no longer has access to "test1" channel, so they should get disconnected
+        catch {$rd2 read} e
+        assert_match {*I/O error*} $e
+
+        $rd1 close
+        $rd2 close
+    }
+
+    test {ACL LOAD disconnects clients of deleted users} {
+        reconnect
+        r ACL SETUSER mortimer on >mortimer ~* &* +@all
+
+        set rd1 [redis_deferring_client]
+        set rd2 [redis_deferring_client]
+
+        $rd1 AUTH alice alice
+        $rd1 read
+        $rd1 SUBSCRIBE test
+        $rd1 read
+
+        $rd2 AUTH mortimer mortimer
+        $rd2 read
+        $rd2 SUBSCRIBE test
+        $rd2 read
+
+        r ACL LOAD
+        r PUBLISH test test-message
+
+        # Permissions for 'alice' haven't changed, so they should still be connected
+        assert_match {*test-message*} [$rd1 read]
+
+        # 'mortimer' has been deleted, so their client should get disconnected
+        catch {$rd2 read} e
+        assert_match {*I/O error*} $e
+
+        $rd1 close
+        $rd2 close
+    }
+
     test {ACL load and save} {
         r ACL setuser eve +get allkeys >eve on
         r ACL save
 
-        # ACL load will free user and kill clients
         r ACL load
-        catch {r ACL LIST} e
-        assert_match {*I/O error*} $e
 
-        reconnect
+        # Clients should not be disconnected since permissions haven't changed
+
         r AUTH alice alice
         r SET key value
         r AUTH eve eve
@@ -1007,12 +1103,10 @@ start_server [list overrides [list "dir" $server_path "acl-pubsub-default" "allc
         r ACL setuser harry on nopass resetchannels &test +@all ~*
         r ACL save
 
-        # ACL load will free user and kill clients
         r ACL load
-        catch {r ACL LIST} e
-        assert_match {*I/O error*} $e
 
-        reconnect
+        # Clients should not be disconnected since permissions haven't changed
+
         r AUTH harry anything
         r publish test bar
         catch {r publish test1 bar} e
@@ -1133,10 +1227,10 @@ start_server [list overrides [list "dir" $server_path "aclfile" "user.acl"] tags
     }
     
     test {Test loading duplicate users in config on startup} {
-        catch {exec src/redis-server --user foo --user foo} err
+        catch {exec src/valkey-server --user foo --user foo} err
         assert_match {*Duplicate user*} $err
 
-        catch {exec src/redis-server --user default --user default} err
+        catch {exec src/valkey-server --user default --user default} err
         assert_match {*Duplicate user*} $err
     } {} {external:skip}
 }

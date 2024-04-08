@@ -9,7 +9,7 @@ done
 
 if [ -z $TCLSH ]
 then
-    echo "You need tcl 8.5 or newer in order to run the Redis ModuleApi test"
+    echo "You need tcl 8.5 or newer in order to run the Valkey ModuleApi test"
     exit 1
 fi
 
@@ -55,4 +55,5 @@ $TCLSH tests/test_helper.tcl \
 --single unit/moduleapi/async_rm_call \
 --single unit/moduleapi/moduleauth \
 --single unit/moduleapi/rdbloadsave \
+--single unit/moduleapi/crash \
 "${@}"

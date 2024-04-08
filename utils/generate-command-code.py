@@ -242,7 +242,8 @@ class Argument(object):
 
 def to_c_name(str):
     return str.replace(":", "").replace(".", "_").replace("$", "_")\
-        .replace("^", "_").replace("*", "_").replace("-", "_")
+        .replace("^", "_").replace("*", "_").replace("-", "_") \
+        .replace("\\", "_").replace("+", "_")
 
 
 class ReplySchema(object):
@@ -285,7 +286,7 @@ class ReplySchema(object):
                 t = "JSON_TYPE_INTEGER"
                 vstr = ".value.integer=%d" % v
             
-            return "%s,\"%s\",%s" % (t, k, vstr)
+            return "%s,%s,%s" % (t, json.dumps(k), vstr)
 
         for k, v in self.schema.items():
             if isinstance(v, ReplySchema):
@@ -577,7 +578,7 @@ with open("%s/%s.def" % (srcdir, commands_filename), "w") as f:
  * the fantastic
  * Redis Command Table! */
 
-/* Must match redisCommandGroup */
+/* Must match serverCommandGroup */
 const char *COMMAND_GROUP_STR[] = {
     "generic",
     "string",
@@ -610,7 +611,7 @@ const char *commandGroupStr(int index) {
         command.write_internal_structs(f)
 
     f.write("/* Main command table */\n")
-    f.write("struct COMMAND_STRUCT redisCommandTable[] = {\n")
+    f.write("struct COMMAND_STRUCT serverCommandTable[] = {\n")
     curr_group = None
     for command in command_list:
         if curr_group != command.group:

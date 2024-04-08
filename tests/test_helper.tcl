@@ -64,8 +64,8 @@ set ::all_tests {
     integration/psync2-pingoff
     integration/psync2-master-restart
     integration/failover
-    integration/redis-cli
-    integration/redis-benchmark
+    integration/valkey-cli
+    integration/valkey-benchmark
     integration/dismiss-mem
     unit/pubsub
     unit/pubsubshard
@@ -94,13 +94,17 @@ set ::all_tests {
     unit/client-eviction
     unit/violations
     unit/replybufsize
+    unit/cluster/announced-endpoints
     unit/cluster/misc
     unit/cluster/cli
     unit/cluster/scripting
     unit/cluster/hostnames
+    unit/cluster/human-announced-nodename
     unit/cluster/multi-slot-operations
     unit/cluster/slot-ownership
     unit/cluster/links
+    unit/cluster/cluster-response-tls
+    unit/cluster/failure-marking
 }
 # Index to the next test to run in the ::all_tests list.
 set ::next_test 0
@@ -195,6 +199,12 @@ proc srv {args} {
     dict get $srv $property
 }
 
+# Take an index to get a srv.
+proc get_srv {level} {
+    set srv [lindex $::servers end+$level]
+    return $srv
+}
+
 # Provide easy access to the client for the inner server. It's possible to
 # prepend the argument list with a negative level to access clients for
 # servers running in outer blocks.
@@ -274,7 +284,7 @@ proc redis_client {args} {
         set args [lrange $args 1 end]
     }
 
-    # create client that defers reading reply
+    # create client that won't defers reading reply
     set client [redis [srv $level "host"] [srv $level "port"] 0 $::tls]
 
     # select the right db and read the response (OK), or at least ping
@@ -317,8 +327,9 @@ proc run_solo {name code} {
 proc cleanup {} {
     if {!$::quiet} {puts -nonewline "Cleanup: may take some time... "}
     flush stdout
-    catch {exec rm -rf {*}[glob tests/tmp/redis.conf.*]}
-    catch {exec rm -rf {*}[glob tests/tmp/server.*]}
+    catch {exec rm -rf {*}[glob tests/tmp/valkey.conf.*]}
+    catch {exec rm -rf {*}[glob tests/tmp/server*.*]}
+    catch {exec rm -rf {*}[glob tests/tmp/*.acl.*]}
     if {!$::quiet} {puts "OK"}
 }
 
