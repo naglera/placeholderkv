@@ -2048,3 +2048,76 @@ start_server {tags {"repl rdb-channel external:skip"}} {
         stop_write_load $load_handle0
     }
 }
+
+start_server {tags {"repl rdb-channel external:skip"}} {
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+    set loglines [count_log_lines 0]
+
+    $master config set repl-diskless-sync yes
+    $master config set repl-rdb-channel yes
+    $master config set client-output-buffer-limit "replica 1100k 0 0"
+    $master config set loglevel debug
+    # generate small db
+    populate 10 master 10
+    # Stop master main process after fork for 1 seconds
+    $master debug sleep-after-fork [expr {2 * [expr {10 ** 6}]}]
+    start_server {} {
+        set replica [srv 0 client]
+        set replica_host [srv 0 host]
+        set replica_port [srv 0 port]
+        set replica_log [srv 0 stdout]
+        
+        set load_handle0 [start_write_load $master_host $master_port 20]
+        set load_handle1 [start_write_load $master_host $master_port 20]
+        set load_handle2 [start_write_load $master_host $master_port 20]
+
+        $replica config set repl-rdb-channel yes
+        $replica config set loglevel debug
+        $replica config set repl-timeout 10
+
+        test "Test rdb-channel master gets cob overrun before established psync" {
+            $replica slaveof $master_host $master_port
+            wait_for_log_messages 0 {"*Done loading RDB*"} 0 2000 1
+
+            # At this point rdb is loaded but psync hasn't been established yet. 
+            # Force the replica to sleep for 5 seconds so the master main process will wake up while the
+            # replica is unresponsive. We expect the main process to fill the COB before the replica wakes.
+            set sleep_handle [start_bg_server_sleep $replica_host $replica_port 5]
+            wait_for_log_messages -1 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 2000 1
+            wait_for_condition 50 100 {
+                [string match {*slaves_waiting_psync:0*} [$master info replication]]
+            } else {
+                fail "Master did not free repl buf block after sync failure"
+            }
+            set res [wait_for_log_messages -1 {"*Unable to partial resync with replica * for lack of backlog*"} $loglines 20000 1]
+            set loglines [lindex $res 1]
+        }
+
+        $replica slaveof no one
+        $replica debug sleep-after-fork [expr {2 * [expr {10 ** 6}]}]
+
+        $master debug populate 1000 master 100000
+        # Set master with a slow rdb generation, so that we can easily intercept loading
+        # 10ms per key, with 1000 keys is 10 seconds
+        $master config set rdb-key-save-delay 10000
+        $master debug sleep-after-fork 0
+
+        test "Test rdb-channel master gets cob overrun during replica rdb load" {
+            $replica slaveof $master_host $master_port
+
+            wait_for_log_messages -1 {"*Client * closed * for overcoming of output buffer limits.*"} $loglines 2000 1
+            wait_for_condition 50 100 {
+                [string match {*slaves_waiting_psync:0*} [$master info replication]]
+            } else {
+                fail "Master did not free repl buf block after sync failure"
+            }
+            set res [wait_for_log_messages -1 {"*Unable to partial resync with replica * for lack of backlog*"} $loglines 20000 1]
+            set loglines [lindex $res 0]
+        }
+        stop_write_load $load_handle0
+        stop_write_load $load_handle1
+        stop_write_load $load_handle2
+    }
+}

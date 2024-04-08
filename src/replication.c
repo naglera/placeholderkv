@@ -465,13 +465,18 @@ void feedReplicationBuffer(char *s, size_t len) {
             server.master_repl_offset += copy;
             server.repl_backlog->histlen += copy;
         }
+        if (empty_backlog && raxSize(server.slaves_waiting_psync) > 0) {
+            /* Increase refcount for pending replicas. */
+            addSlaveToPsyncWaitingRaxRetrospect();
+        }
 
         /* For output buffer of replicas. */
         listIter li;
         listRewind(server.slaves,&li);
         while((ln = listNext(&li))) {
             client *slave = ln->value;
-            if (!canFeedReplicaReplBuffer(slave)) continue;
+            if (!canFeedReplicaReplBuffer(slave) && 
+                !(slave->flags & CLIENT_PROTECTED_RDB_CHANNEL)) continue;
 
             /* Update shared replication buffer start position. */
             if (slave->ref_repl_buf_node == NULL) {
@@ -494,10 +499,6 @@ void feedReplicationBuffer(char *s, size_t len) {
             /* Replication buffer must be empty before adding replication stream
              * into replication backlog. */
             serverAssert(add_new_block == 1 && start_pos == 0);
-        }
-        if (empty_backlog && raxSize(server.slaves_waiting_psync) > 0) {
-            /* Increase refcount for pending replicas. */
-            addSlaveToPsyncWaitingRaxRetrospect();
         }
         if (add_new_block) {
             createReplicationBacklogIndex(listLast(server.repl_buffer_blocks));

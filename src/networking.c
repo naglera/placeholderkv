@@ -3996,9 +3996,11 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
     if ((c->reply_bytes == 0 && getClientType(c) != CLIENT_TYPE_SLAVE) ||
-        c->flags & CLIENT_CLOSE_ASAP) return 0;
+        (c->flags & CLIENT_CLOSE_ASAP && !(c->flags & CLIENT_PROTECTED_RDB_CHANNEL))) return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);
+        /* Remove RDB connection protection on COB overrun */
+        c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
         if (async) {
             freeClientAsync(c);
             serverLog(LL_WARNING,
