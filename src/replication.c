@@ -3234,7 +3234,20 @@ void setupMainConnForPsync(connection *conn) {
 }
 
 /*
- * RDB-Channel sync high level interface design:
+ * RDB-Channel for full sync
+ *
+ * * Motivation *
+ *  - Reduce master memory load. We do that by moving the COB tracking to the replica side. This also decrease 
+ *    the chance for COB overruns. Note that master's input buffer limits at the replica side are less restricted 
+ *    then master's COB as the replica plays less critical part in the replication group. While increasing the 
+ *    primary’s COB may end up with primary reaching swap and clients suffering, at replica side we’re more at 
+ *    ease with it. Larger COB means better chance to sync successfully.
+ *  - Reduce master main process CPU load. By opening a new, dedicated connection for the RDB transfer, child 
+ *    processes can have direct access to the new connection. Due to TLS connection restrictions, this was not 
+ *    possible using one main connection. We eliminate the need for the child process to use the master's 
+ *    child-proc -> main-proc pipeline, thus freeing up the main process to process clients queries.
+ *
+ * * High level interface design *
  *  - RDB-Channel sync begins when the replica sends a REPLCONF MAINCONN to the master during initial 
  *    handshake. This allows the replica to verify whether the master supports rdb-channel sync and, if 
  *    so, state that this is the replica's main connection, which is not used for snapshot transfer. 
@@ -3251,14 +3264,7 @@ void setupMainConnForPsync(connection *conn) {
  *  - Once the replica completes loading the rdb, it drops the rdb-connection and streams the accumulated incremental 
  *    changes into memory. Repl steady state continues normally.
  * 
- * Sync performance is improved in two ways by RDB-channels:
- * - CPU load from the master's main process. As a result of using another connection for RDB transfers, we allow bgsave 
- *   to write directly to the replica without pipeline to main process.
- * - Memory load from the master's node. The master will use less memory while syncing because we send incremental data 
- *   simultaneously with the snapshot.
- *
- * ----------------------------------  New Replica state machine ----------------------------------
- * 
+ * * Replica state machine *
  *                                                             RDB Channel Sync                                                 
  *                                                          ┌──────────────────────────────────────────────────────────────┐    
  *                                                          │   RDB connection states               Main connection state  │    
@@ -3292,10 +3298,9 @@ void setupMainConnForPsync(connection *conn) {
  *   │+OK │Unrecognized REPLCONF      │           │                                                                             
  * ┌─▼────▼────────────┐       │   ┌──▼───────────▼────┐                                                                        
  * │RECEIVE_CAPA_REPLY ├───────┘   │CONNECTED          │                                                                        
- * └───────────────────┘           └───────────────────┘                                                                        
- *                                                                                                                              
- *
- * This handler fires when the non blocking connect was able to
+ * └───────────────────┘           └───────────────────┘                                                                                                                                                                                                      
+ */ 
+/* This handler fires when the non blocking connect was able to
  * establish a connection with the master. */
 void syncWithMaster(connection *conn) {
     char tmpfile[256], *err = NULL;
