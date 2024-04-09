@@ -3543,7 +3543,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
     listIter li;
     pid_t childpid;
     int pipefds[2], rdb_pipe_write, safe_to_exit_pipe;
-    int direct = (req &= SLAVE_REQ_RDB_CHANNEL);
+    int direct = (req & SLAVE_REQ_RDB_CHANNEL);
 
     if (hasActiveChildProcess()) return C_ERR;
 
