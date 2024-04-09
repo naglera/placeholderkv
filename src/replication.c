@@ -3090,6 +3090,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     if (!strncmp(reply,"+CONTINUE",9)) {
         if (server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE) {
             /* During rdb-sync sesseion, master struct is already initialized. */
+            sdsfree(reply);
             return PSYNC_CONTINUE;
         }
         /* Partial resync was accepted. */
