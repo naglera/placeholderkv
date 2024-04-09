@@ -3573,6 +3573,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
      * the RDB to, which are i WAIT_BGSAVE_START state. */
     int connsnum = 0;
     connection **conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
+    server.rdb_pipe_conns = NULL;
     if (!direct) {
         server.rdb_pipe_conns = conns;
         server.rdb_pipe_numconns = 0;

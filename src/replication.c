@@ -1264,7 +1264,17 @@ void syncCommand(client *c) {
  * - rdb-filter-only <include-filters>
  * Define "include" filters for the RDB snapshot. Currently we only support
  * a single include filter: "functions". Passing an empty string "" will
- * result in an empty RDB. */
+ * result in an empty RDB. 
+ * 
+ * - rdb-channel <1|0>
+ * Used to identify the client as a replica's rdb connection in an rdb connection 
+ * sync session. 
+ * 
+ * - main-conn <1|0>
+ * Used to identify the replica main connection during 
+ * rdb-connection sync. It also means that if psync is impossible, master 
+ * should not auto trigger full sync.
+ * */
 void replconfCommand(client *c) {
     int j;
 
@@ -1378,8 +1388,6 @@ void replconfCommand(client *c) {
             }
             sdsfreesplitres(filters, filter_count);
         } else if (!strcasecmp(c->argv[j]->ptr, "rdb-conn")) {
-            /* REPLCONF rdb-conn is used to identify the client as a 
-             * replica's rdb connection in an rdb connection sync session. */
             long start_with_offset = 0;
             if (getRangeLongFromObjectOrReply(c, c->argv[j +1],
                     0, 1, &start_with_offset,NULL) != C_OK) {
@@ -1393,10 +1401,7 @@ void replconfCommand(client *c) {
                 c->slave_req &= ~SLAVE_REQ_RDB_CHANNEL;
             }
         } else if (!strcasecmp(c->argv[j]->ptr, "main-conn") && server.rdb_channel_enabled) {
-            /* REPLCONF main-conn is used to identify the replica main connection during 
-             * rdb-connection sync. It also means that if psync is impossible, master 
-             * should not auto trigger full sync.
-             * If rdb-channel is disable on this master, treat this command as unrecognized 
+            /* If rdb-channel is disable on this master, treat this command as unrecognized 
              * replconf option. */
             long main_conn = 0;
             if (getRangeLongFromObjectOrReply(c, c->argv[j +1],
