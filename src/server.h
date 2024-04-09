@@ -1650,7 +1650,7 @@ struct valkeyServer {
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
-    rax *slaves_waiting_psync;  /* Radis tree using rdb-client id as keys and rdb-client as values.
+    rax *slaves_waiting_psync;  /* Radix tree using rdb-client id as keys and rdb-client as values.
                                  * This rax contains slaves for the period from the beginning of 
                                  * their RDB connection to the end of their main connection's 
                                  * partial synchronization. */

@@ -1810,13 +1810,14 @@ int freeClientsInAsyncFreeQueue(void) {
     while ((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
 
-        if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {            /* Check if we can remove RDB connection protection. */
+        if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
+            /* Check if we can remove RDB connection protection. */
             if (!c->rdb_client_disconnect_time) {
                 c->rdb_client_disconnect_time = server.unixtime;
                 continue;
             }
             if (server.unixtime - c->rdb_client_disconnect_time > server.wait_before_rdb_client_free) {
-                serverLog(LL_NOTICE, "Replica main connection failed to establish PSYNC within the grace period. Freeing RDB client %lu.", c->id);
+                serverLog(LL_NOTICE, "Replica main connection failed to establish PSYNC within the grace period (%ld seconds). Freeing RDB client %llu.", (long int)(server.unixtime - c->rdb_client_disconnect_time), (unsigned long long)c->id);
                 c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
             }
         }
@@ -2736,7 +2737,7 @@ void readQueryFromClient(connection *conn) {
             sds info = catClientInfoString(sdsempty(), c);
             serverLog(LL_VERBOSE, "Client closed connection %s", info);
             if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
-                serverLog(LL_VERBOSE, "Postpone RDB client (%lu) free for %d seconds", c->id, server.wait_before_rdb_client_free);
+                serverLog(LL_VERBOSE, "Postpone RDB client (%llu) free for %d seconds", (unsigned long long)c->id, server.wait_before_rdb_client_free);
             }
             sdsfree(info);
         }
@@ -2751,7 +2752,7 @@ void readQueryFromClient(connection *conn) {
     c->lastinteraction = server.unixtime;
     if (c->flags & CLIENT_MASTER) {
         c->read_reploff += nread;
-        atomicIncr(server.stat_total_reads_processed, nread);
+        atomicIncr(server.stat_net_repl_input_bytes, nread);
     } else {
         atomicIncr(server.stat_net_input_bytes, nread);
     }

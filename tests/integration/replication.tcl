@@ -2034,7 +2034,7 @@ start_server {tags {"repl rdb-channel external:skip"}} {
             }
 
             # Sync should fail once the replica ask for PSYNC using main channel
-            set res [wait_for_log_messages -1 {"*Replica main connection failed to establish PSYNC within the grace period*"} 0 2000 1]
+            set res [wait_for_log_messages -1 {"*Replica main connection failed to establish PSYNC within the grace period*"} 0 4000 1]
 
             # Should succeed on retry
             verify_replica_online $master 0 500

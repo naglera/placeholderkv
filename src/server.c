@@ -6024,7 +6024,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             }
         }
         info = sdscatprintf(info, FMTARGS(
-            "slaves_waiting_psync:%llu\r\n", raxSize(server.slaves_waiting_psync),
+            "slaves_waiting_psync:%llu\r\n", (unsigned long long)raxSize(server.slaves_waiting_psync),
             "master_failover_state:%s\r\n", getFailoverStateString(),
             "master_replid:%s\r\n", server.replid,
             "master_replid2:%s\r\n", server.replid2,
