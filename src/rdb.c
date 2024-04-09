@@ -3630,6 +3630,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         }
         if (direct) {
             rioFreeConnset(&rdb);
+            zfree(conns);
         } else {
             rioFreeFd(&rdb);
         }
