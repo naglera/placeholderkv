@@ -2610,6 +2610,7 @@ void abortRdbConnectionSync(void) {
     server.repl_provisional_master.conn = NULL;
     server.repl_provisional_master.dbid = -1;
     server.rdb_client_id = -1;
+    if (server.repl_transfer_tmpfile) zfree(server.repl_transfer_tmpfile);
     freePendingReplDataBuf();
     return;
 }
