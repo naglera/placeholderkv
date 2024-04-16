@@ -3631,7 +3631,6 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         }
         if (direct) {
             rioFreeConnset(&rdb);
-            zfree(conns);
         } else {
             rioFreeFd(&rdb);
         }
@@ -3678,6 +3677,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                 serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
             }
+            if (direct) zfree(conns);
         }
         close(safe_to_exit_pipe);
         return (childpid == -1) ? C_ERR : C_OK;

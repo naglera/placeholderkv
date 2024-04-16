@@ -226,7 +226,7 @@ void addSlaveToPsyncWaitingRax(client* slave) {
             tail->refcount++;
         }
     }
-    serverLog(LL_DEBUG, "Add slave %s to waiting psync rax, with cid %lu, %s ", replicationGetSlaveName(slave), slave->id,
+    serverLog(LL_DEBUG, "Add slave %s to waiting psync rax, with cid %llu, %s ", replicationGetSlaveName(slave), (long long unsigned int)slave->id,
         tail? "with repl-backlog tail": "repl-backlog is empty");
     slave->ref_repl_buf_node = tail? ln: NULL;
     /* Prevent rdb client from being freed before psync is established. */
@@ -250,7 +250,7 @@ void addSlaveToPsyncWaitingRaxRetrospect(void) {
         if (slave->ref_repl_buf_node) continue;
         slave->ref_repl_buf_node = ln;
         head->refcount++;
-        serverLog(LL_DEBUG, "Retrospect attach slave %lu to repl buf block", slave->id);
+        serverLog(LL_DEBUG, "Retrospect attach slave %llu to repl buf block", (long long unsigned int)slave->id);
     }
     raxStop(&iter);
 }
@@ -268,8 +268,8 @@ void removeSlaveFromPsyncWaitingRax(client* slave) {
     }
     peer_slave->ref_repl_buf_node = NULL;
     peer_slave->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
-    serverLog(LL_DEBUG, "Remove psync waiting slave %s with cid %lu, repl buffer block %s", 
-        replicationGetSlaveName(slave), slave->associated_rdb_client_id, o? "ref count decreased": "doesn't exist");
+    serverLog(LL_DEBUG, "Remove psync waiting slave %s with cid %llu, repl buffer block %s", 
+        replicationGetSlaveName(slave), (long long unsigned int)slave->associated_rdb_client_id, o? "ref count decreased": "doesn't exist");
     uint64_t id = htonu64(peer_slave->id);
     raxRemove(server.slaves_waiting_psync,(unsigned char*)&id,sizeof(id),NULL);
 }
@@ -2620,9 +2620,9 @@ void abortRdbConnectionSync(void) {
 int sendCurrentOffsetToReplica(client* replica) {
     char buf[128];
     int buflen;
-    buflen = snprintf(buf, sizeof(buf), "$ENDOFF:%lld %s %d %lu\r\n", server.master_repl_offset, server.replid, server.db->id, replica->id);
-    serverLog(LL_NOTICE, "Sending to replica %s RDB end offset %lld and client-id %lu", 
-        replicationGetSlaveName(replica), server.master_repl_offset, replica->id);    
+    buflen = snprintf(buf, sizeof(buf), "$ENDOFF:%lld %s %d %llu\r\n", server.master_repl_offset, server.replid, server.db->id, (long long unsigned int)replica->id);
+    serverLog(LL_NOTICE, "Sending to replica %s RDB end offset %lld and client-id %llu", 
+        replicationGetSlaveName(replica), server.master_repl_offset, (long long unsigned int)replica->id);    
     if (connSyncWrite(replica->conn, buf, buflen, server.repl_syncio_timeout*1000) != buflen) {
         freeClientAsync(replica);
         return C_ERR;
