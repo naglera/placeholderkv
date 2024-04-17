@@ -2599,6 +2599,7 @@ void freePendingReplDataBuf(void) {
  * Upon rdb-sync failure, close rdb-connection, reset repl-state, reset 
  * provisional master struct, and free local replication buffer. */
 void abortRdbConnectionSync(void) {
+    serverAssert(server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE);
     serverLog(LL_WARNING, "Aborting RDB connection sync");
     if (server.repl_rdb_transfer_s) {
         connClose(server.repl_rdb_transfer_s);
@@ -3615,7 +3616,7 @@ void syncWithMaster(connection *conn) {
                     connGetLastError(server.repl_transfer_s));
             connClose(server.repl_rdb_transfer_s);
             server.repl_rdb_transfer_s = NULL;
-            return;
+            goto error;
         }
         if (connSetReadHandler(conn, NULL) == C_ERR) {
             char conninfo[CONN_INFO_LEN];
@@ -3727,9 +3728,10 @@ void replicationAbortSyncTransfer(void) {
  *
  * Otherwise zero is returned and no operation is performed at all. */
 int cancelReplicationHandshake(int reconnect) {
-    if (server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE)
+    if (server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE) {
+        replicationAbortSyncTransfer();
         abortRdbConnectionSync();
-    if (server.repl_state == REPL_STATE_TRANSFER) {
+    } else if (server.repl_state == REPL_STATE_TRANSFER) {
         replicationAbortSyncTransfer();
         server.repl_state = REPL_STATE_CONNECT;
     } else if (server.repl_state == REPL_STATE_CONNECTING ||
