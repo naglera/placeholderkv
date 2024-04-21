@@ -3707,7 +3707,8 @@ void undoConnectWithMaster(void) {
  * Never call this function directly, use cancelReplicationHandshake() instead.
  */
 void replicationAbortSyncTransfer(void) {
-    serverAssert(server.repl_state == REPL_STATE_TRANSFER);
+    serverAssert(server.repl_state == REPL_STATE_TRANSFER || 
+        server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE);
     undoConnectWithMaster();
     if (server.repl_transfer_fd!=-1) {
         close(server.repl_transfer_fd);
