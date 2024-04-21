@@ -3634,6 +3634,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         } else {
             rioFreeFd(&rdb);
         }
+        zfree(conns);
         /* wake up the reader, tell it we're done. */
         close(rdb_pipe_write);
         close(server.rdb_child_exit_pipe); /* close write end so that we can detect the close on the parent. */
