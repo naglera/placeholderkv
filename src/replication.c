@@ -2605,6 +2605,10 @@ void abortRdbConnectionSync(void) {
         connClose(server.repl_rdb_transfer_s);
         server.repl_rdb_transfer_s = NULL;
     }
+    if (server.repl_transfer_tmpfile) {
+        zfree(server.repl_transfer_tmpfile);
+        server.repl_transfer_tmpfile = NULL;
+    }
     server.repl_rdb_conn_state = REPL_RDB_CONN_STATE_NONE;
     server.repl_provisional_master.read_reploff = 0;
     server.repl_provisional_master.reploff = 0;
@@ -2695,11 +2699,12 @@ void fullSyncWithMaster(connection* conn) {
     }
     /* Receive master rdb-channel end offset response */
     if (server.repl_rdb_conn_state == REPL_RDB_CONN_RECEIVE_ENDOFF) {
-        char buf[PROTO_IOBUF_LEN];
         int64_t rdb_client_id;
-        connSyncReadLine(conn, buf, 1024, server.repl_syncio_timeout * 1000);
-        if (buf[0] == '\0') {
+        err = receiveSynchronousResponse(conn);
+        if (err == NULL) goto error;
+        if (err[0] == '\0') {
             /* Retry again later */
+            sdsfree(err);
             return;
         }
         long long reploffset;
@@ -2707,9 +2712,10 @@ void fullSyncWithMaster(connection* conn) {
         int dbid;
         /* Parse end offset response */
         char *endoff_format = "$ENDOFF:%lld %40s %d %ld";
-        if (sscanf(buf, endoff_format, &reploffset, master_replid, &dbid, &rdb_client_id) != 4) {
+        if (sscanf(err, endoff_format, &reploffset, master_replid, &dbid, &rdb_client_id) != 4) {
             goto error;
         }
+        sdsfree(err);
         server.rdb_client_id = rdb_client_id;
         server.master_initial_offset = reploffset;
 
@@ -2745,7 +2751,17 @@ void fullSyncWithMaster(connection* conn) {
         /* Fall through to regular error handling */
 
     error:
-        cancelReplicationHandshake(1);
+        connClose(conn);
+        server.repl_transfer_s = NULL;
+        if (server.repl_rdb_transfer_s) {
+            connClose(server.repl_rdb_transfer_s);
+            server.repl_rdb_transfer_s = NULL;
+        }
+        if (server.repl_transfer_fd != -1)
+            close(server.repl_transfer_fd);
+        server.repl_transfer_fd = -1;
+        server.repl_state = REPL_STATE_CONNECT;
+        abortRdbConnectionSync();
         return;
 
     write_error: /* Handle sendCommand() errors. */
@@ -3488,7 +3504,7 @@ void syncWithMaster(connection *conn) {
 
     if (server.repl_state == REPL_STATE_RECEIVE_NO_FULLSYNC_REPLY) {
         err = receiveSynchronousResponse(conn);
-        if (err == NULL) goto rdb_conn_error;
+        if (err == NULL) goto error;
         else if (err[0] == '-') {
             /* Activate rdb-channel fallback mechanism. The master did not understand 
              * REPLCONF main-conn. This means the master does not support RDB channel 
@@ -3665,10 +3681,6 @@ error:
     server.repl_transfer_fd = -1;
     server.repl_state = REPL_STATE_CONNECT;
     return;
-
-rdb_conn_error:
-    cancelReplicationHandshake(1);
-    goto error;
 
 write_error: /* Handle sendCommand() errors. */
     serverLog(LL_WARNING,"Sending command to master in replication handshake: %s", err);
