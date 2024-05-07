@@ -556,6 +556,7 @@ foreach testType {Successful Aborted} {
             $master config set save ""
             $replica config set repl-diskless-load swapdb
             $replica config set save ""
+            $replica config set repl-rdb-channel no; # Doesn't work with swapdb
 
             # Set replica writable so we can check that a key we manually added is served
             # during replication and after failure, but disappears on success
@@ -860,6 +861,7 @@ start_server {tags {"repl external:skip"} overrides {save ""}} {
     $master config set repl-diskless-sync yes
     $master config set repl-diskless-sync-delay 5
     $master config set repl-diskless-sync-max-replicas 2
+    $master config set repl-rdb-channel "no"; # rdb-channel doesn't use pipe
     set master_host [srv 0 host]
     set master_port [srv 0 port]
     set master_pid [srv 0 pid]
@@ -1244,69 +1246,80 @@ test {Kill rdb child process if its dumping RDB is not useful} {
         }
     }
 } {} {external:skip}
-
-start_server {tags {"repl external:skip"}} {
-    set master1_host [srv 0 host]
-    set master1_port [srv 0 port]
-    r set a b
-
-    start_server {} {
-        set master2 [srv 0 client]
-        set master2_host [srv 0 host]
-        set master2_port [srv 0 port]
-        # Take 10s for dumping RDB
-        $master2 debug populate 10 master2 10
-        $master2 config set rdb-key-save-delay 1000000
+foreach rdbchannel {yes no} {
+    start_server {tags {"repl external:skip"}} {
+        set master1 [srv 0 client]
+        set master1_host [srv 0 host]
+        set master1_port [srv 0 port]
+        $master1 config set repl-rdb-channel $rdbchannel
+        r set a b
 
         start_server {} {
-            set sub_replica [srv 0 client]
+            set master2 [srv 0 client]
+            set master2_host [srv 0 host]
+            set master2_port [srv 0 port]
+            # Take 10s for dumping RDB
+            $master2 debug populate 10 master2 10
+            $master2 config set rdb-key-save-delay 1000000
+            $master2 config set repl-rdb-channel $rdbchannel
 
             start_server {} {
-                # Full sync with master1
-                r slaveof $master1_host $master1_port
-                wait_for_sync r
-                assert_equal "b" [r get a]
+                set sub_replica [srv 0 client]
+                $sub_replica config set repl-rdb-channel $rdbchannel
 
-                # Let sub replicas sync with me
-                $sub_replica slaveof [srv 0 host] [srv 0 port]
-                wait_for_sync $sub_replica
-                assert_equal "b" [$sub_replica get a]
-
-                # Full sync with master2, and then kill master2 before finishing dumping RDB
-                r slaveof $master2_host $master2_port
-                wait_for_condition 50 100 {
-                    ([s -2 rdb_bgsave_in_progress] == 1) &&
-                    ([string match "*wait_bgsave*" [s -2 slave0]])
-                } else {
-                    fail "full sync didn't start"
-                }
-                catch {$master2 shutdown nosave}
-
-                test {Don't disconnect with replicas before loading transferred RDB when full sync} {
-                    assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
-                    # The replication id is not changed in entire replication chain
-                    assert_equal [s master_replid] [s -3 master_replid]
-                    assert_equal [s master_replid] [s -1 master_replid]
-                }
-
-                test {Discard cache master before loading transferred RDB when full sync} {
-                    set full_sync [s -3 sync_full]
-                    set partial_sync [s -3 sync_partial_ok]
-                    # Partial sync with master1
+                start_server {} {
+                    # Full sync with master1
+                    set replica [srv 0 client]
+                    $replica config set repl-rdb-channel $rdbchannel
                     r slaveof $master1_host $master1_port
                     wait_for_sync r
-                    # master1 accepts partial sync instead of full sync
-                    assert_equal $full_sync [s -3 sync_full]
-                    assert_equal [expr $partial_sync+1] [s -3 sync_partial_ok]
+                    assert_equal "b" [r get a]
 
-                    # Since master only partially sync replica, and repl id is not changed,
-                    # the replica doesn't disconnect with its sub-replicas
-                    assert_equal [s master_replid] [s -3 master_replid]
-                    assert_equal [s master_replid] [s -1 master_replid]
-                    assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
-                    # Sub replica just has one full sync, no partial resync.
-                    assert_equal 1 [s sync_full]
-                    assert_equal 0 [s sync_partial_ok]
+                    # Let sub replicas sync with me
+                    $sub_replica slaveof [srv 0 host] [srv 0 port]
+                    wait_for_sync $sub_replica
+                    assert_equal "b" [$sub_replica get a]
+
+                    # Full sync with master2, and then kill master2 before finishing dumping RDB
+                    r slaveof $master2_host $master2_port
+                    wait_for_condition 50 100 {
+                        ([s -2 rdb_bgsave_in_progress] == 1) &&
+                        ([string match "*wait_bgsave*" [s -2 slave0]])
+                    } else {
+                        fail "full sync didn't start"
+                    }
+                    catch {$master2 shutdown nosave}
+
+                    test "Don't disconnect with replicas before loading transferred RDB when full sync with rdb-channel $rdbchannel" {
+                        assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
+                        # The replication id is not changed in entire replication chain
+                        assert_equal [s master_replid] [s -3 master_replid]
+                        assert_equal [s master_replid] [s -1 master_replid]
+                    }
+
+                    test "Discard cache master before loading transferred RDB when full sync with rdb-channel $rdbchannel" {
+                        set full_sync [s -3 sync_full]
+                        set partial_sync [s -3 sync_partial_ok]
+                        # Partial sync with master1
+                        r slaveof $master1_host $master1_port
+                        wait_for_sync r
+                        # master1 accepts partial sync instead of full sync
+                        assert_equal $full_sync [s -3 sync_full]
+                        assert_equal [expr $partial_sync+1] [s -3 sync_partial_ok]
+
+                        # Since master only partially sync replica, and repl id is not changed,
+                        # the replica doesn't disconnect with its sub-replicas
+                        assert_equal [s master_replid] [s -3 master_replid]
+                        assert_equal [s master_replid] [s -1 master_replid]
+                        assert ![log_file_matches [srv -1 stdout] "*Connection with master lost*"]
+                        # Sub replica just has one full sync, no partial resync.
+                        assert_equal 1 [s sync_full]
+                        if {$rdbchannel == "yes"} {
+                            assert_equal 1 [s sync_partial_ok]
+                        } else {
+                            assert_equal 0 [s sync_partial_ok]
+                        }
+                    }
                 }
             }
         }
