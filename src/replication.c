@@ -3729,9 +3729,9 @@ void replicationAbortSyncTransfer(void) {
  * Otherwise zero is returned and no operation is performed at all. */
 int cancelReplicationHandshake(int reconnect) {
     if (server.repl_rdb_conn_state != REPL_RDB_CONN_STATE_NONE) {
-        replicationAbortSyncTransfer();
         abortRdbConnectionSync();
-    } else if (server.repl_state == REPL_STATE_TRANSFER) {
+    }
+    if (server.repl_state == REPL_STATE_TRANSFER) {
         replicationAbortSyncTransfer();
         server.repl_state = REPL_STATE_CONNECT;
     } else if (server.repl_state == REPL_STATE_CONNECTING ||
