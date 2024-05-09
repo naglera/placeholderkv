@@ -2704,6 +2704,7 @@ void fullSyncWithMaster(connection* conn) {
         if (err == NULL) goto error;
         if (err[0] == '\0') {
             /* Retry again later */
+            serverLog(LL_DEBUG, "Recived empty $ENDOFF response");
             sdsfree(err);
             return;
         }
@@ -2903,6 +2904,7 @@ void streamReplDataBufToDb(client *c) {
  * After done loading the snapshot using the rdb-connection prepare this replica for steady state by
  * initializing the master client, amd stream local increamental buffer into memory. */
 void rdbChannelSyncSuccess(void) {
+    server.master_initial_offset = server.repl_provisional_master.reploff;
     replicationResurrectProvisionalMaster();
     /* Wait for the accumulated buffer to be processed before reading any more replication updates */
     if (server.pending_repl_data.blocks) streamReplDataBufToDb(server.master);
