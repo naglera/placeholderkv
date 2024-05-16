@@ -1913,8 +1913,8 @@ start_server {tags {"repl rdb-channel external:skip"}} {
             $master config set repl-backlog-size $backlog_size
             $master config set loglevel debug
             $master config set repl-timeout 10
-            $master config set rdb-key-save-delay 200
-            populate 10000 master 10000
+            $master config set rdb-key-save-delay 10
+            populate 1024 master 16
             
             set load_handle0 [start_write_load $master_host $master_port 20]
 

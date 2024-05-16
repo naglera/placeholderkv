@@ -2609,6 +2609,10 @@ void abortRdbConnectionSync(void) {
         zfree(server.repl_transfer_tmpfile);
         server.repl_transfer_tmpfile = NULL;
     }
+    if (server.repl_transfer_fd != -1) {
+        close(server.repl_transfer_fd);
+        server.repl_transfer_fd = -1;
+    }
     server.repl_rdb_conn_state = REPL_RDB_CONN_STATE_NONE;
     server.repl_provisional_master.read_reploff = 0;
     server.repl_provisional_master.reploff = 0;
