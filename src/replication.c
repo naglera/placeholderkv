@@ -2704,7 +2704,7 @@ void fullSyncWithMaster(connection* conn) {
         if (err == NULL) goto error;
         if (err[0] == '\0') {
             /* Retry again later */
-            serverLog(LL_DEBUG, "Recived empty $ENDOFF response");
+            serverLog(LL_DEBUG, "Received empty $ENDOFF response");
             sdsfree(err);
             return;
         }
