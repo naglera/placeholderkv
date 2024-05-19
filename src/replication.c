@@ -2660,16 +2660,31 @@ void fullSyncWithMaster(connection* conn) {
         goto error;
     }
     /* Send replica capabilities */
-    if (server.repl_rdb_conn_state == REPL_RDB_CONN_SEND_CAPA) {
-        serverLog(LL_DEBUG, "Received first reply from primary using rdb connection. Sending capa");
-        
+    if (server.repl_rdb_conn_state == REPL_RDB_CONN_SEND_HANDSHAKE) {
+        serverLog(LL_DEBUG, "Received first reply from primary using rdb connection.");
+        /* AUTH with the master if required. */
+        if (server.masterauth) {
+            char *args[3] = {"AUTH",NULL,NULL};
+            size_t lens[3] = {4,0,0};
+            int argc = 1;
+            if (server.masteruser) {
+                args[argc] = server.masteruser;
+                lens[argc] = strlen(server.masteruser);
+                argc++;
+            }
+            args[argc] = server.masterauth;
+            lens[argc] = sdslen(server.masterauth);
+            argc++;
+            err = sendCommandArgv(conn, argc, args, lens);
+            if (err) goto write_error;
+        }
         /* Send replica lisening port to master for clarification */
         sds portstr = getReplicaPortString();        
         err = sendCommand(conn, "REPLCONF", "capa", "eof",
                             "rdb-only", "1", "rdb-conn", "1", "listening-port", portstr, NULL);
         sdsfree(portstr);
         if (err) goto write_error;
-        server.repl_rdb_conn_state = REPL_RDB_CONN_RECEIVE_REPLCONF_REPLY;
+        server.repl_rdb_conn_state = REPL_RDB_CONN_RECEIVE_AUTH_REPLY;
 
         if (connSetReadHandler(conn, fullSyncWithMaster) == C_ERR) {
             char conninfo[CONN_INFO_LEN];
@@ -2678,6 +2693,23 @@ void fullSyncWithMaster(connection* conn) {
                 strerror(errno), connGetInfo(conn, conninfo, sizeof(conninfo)));
             goto error;
         }
+        return;
+    }
+    if (server.repl_rdb_conn_state == REPL_RDB_CONN_RECEIVE_AUTH_REPLY && !server.masterauth) {
+        server.repl_rdb_conn_state = REPL_RDB_CONN_RECEIVE_REPLCONF_REPLY;
+    }
+    /* Receive AUTH reply. */
+    if (server.repl_rdb_conn_state == REPL_RDB_CONN_RECEIVE_AUTH_REPLY) {
+        err = receiveSynchronousResponse(conn);
+        if (err == NULL) goto no_response_error;
+        if (err[0] == '-') {
+            serverLog(LL_WARNING,"Unable to AUTH to MASTER: %s",err);
+            sdsfree(err);
+            goto error;
+        }
+        sdsfree(err);
+        err = NULL;
+        server.repl_rdb_conn_state = REPL_RDB_CONN_RECEIVE_REPLCONF_REPLY;
         return;
     }
     /* Receive replconf response */
@@ -3297,37 +3329,39 @@ void setupMainConnForPsync(connection *conn) {
  *                                                             RDB Channel Sync                                                 
  *                                                          ┌──────────────────────────────────────────────────────────────┐    
  *                                                          │   RDB connection states               Main connection state  │    
- * ┌───────────────────┐           ┌────────────┐           │       ┌──────────────────────────┐    ┌───────────────────┐  │    
- * │RECEIVE_PING_REPLY │       ┌───►SEND_PSYNC  │ -FULLSYNCNEEDED───┤RDB_CONN_SEND_CAPA        │ ┌──►SEND_HANDSHAKE     │  │    
- * └────────┬──────────┘       │   └─┬──────────┘        │  │       └──┬───────────────────────┘ │  └──┬────────────────┘  │    
+ * ┌───────────────────┐           ┌────────────┐           │     ┌────────────────────────────┐    ┌───────────────────┐  │    
+ * │RECEIVE_PING_REPLY │       ┌───►SEND_PSYNC  │ -FULLSYNCNEEDED─┤REPL_RDB_CONN_SEND_HANDSHAKE│ ┌──►SEND_HANDSHAKE     │  │    
+ * └────────┬──────────┘       │   └─┬──────────┘        │  │     └────┬───────────────────────┘ │  └──┬────────────────┘  │    
  *          │+PONG             │     │PSYNC (use cached-master)        │                         │     │REPLCONF set-rdb-conn-id
  * ┌────────▼──────────┐       │   ┌─▼─────────────────┐ │  │  ┌───────▼───────────────────────┐ │  ┌──▼────────────────┐  │    
- * │SEND_HANDSHAKE     │       │ ┌─┤RECEIVE_PSYNC_REPLY├─┘  │  │RDB_CONN_RECEIVE_REPLCONF_REPLY│ │  │RECEIVE_CAPA_REPLY │  │    
+ * │SEND_HANDSHAKE     │       │ ┌─┤RECEIVE_PSYNC_REPLY├─┘  │  │RDB_CONN_RECEIVE_AUTH_REPLY    │ │  │RECEIVE_CAPA_REPLY │  │    
  * └────────┬──────────┘       │ │ └─┬─────────────────┘    │  └───────┬───────────────────────┘ │  └──┬────────────────┘  │    
- *          │                  │ │   │+FULLRESYNC           │          │                         │     │+OK                │    
- * ┌────────▼──────────┐       │ │ ┌─▼─────────────────┐    │  ┌───────▼───────────────┐         │  ┌──▼────────────────┐  │    
- * │RECEIVE_AUTH_REPLY │       │ │ │TRANSFER           │    │  │RDB_CONN_RECEIVE_ENDOFF│         │  │SEND_PSYNC         │  │    
- * └────────┬──────────┘       │ │ └───────────────────┘    │  └───────┬───────────────┘         │  └──┬────────────────┘  │    
- *          │+OK               │ │                          │          │$ENDOFF                  │     │PSYNC use snapshot │    
- * ┌────────▼──────────┐       │ │                          │          ├─────────────────────────┘     │end-offset provided│    
- * │RECEIVE_PORT_REPLY │       │ │                          │          │                               │by the master      │    
+ *          │                  │ │   │+FULLRESYNC           │          │+OK                      │     │+OK                │    
+ * ┌────────▼──────────┐       │ │ ┌─▼─────────────────┐    │  ┌───────▼───────────────────────┐ │  ┌──▼────────────────┐  │    
+ * │RECEIVE_AUTH_REPLY │       │ │ │TRANSFER           │    │  │RDB_CONN_RECEIVE_REPLCONF_REPLY│ │  │SEND_PSYNC         │  │    
+ * └────────┬──────────┘       │ │ └───────────────────┘    │  └───────┬───────────────────────┘ │  └──┬────────────────┘  │    
+ *          │+OK               │ │                          │          │+OK                      │     │PSYNC use snapshot │    
+ * ┌────────▼──────────┐       │ │                          │  ┌───────▼───────────────┐         │     │end-offset provided│    
+ * │RECEIVE_PORT_REPLY │       │ │                          │  │RDB_CONN_RECEIVE_ENDOFF│         │     │by the master      │    
+ * └────────┬──────────┘       │ │                          │  └───────┬───────────────┘         │  ┌──▼────────────────┐  │    
+ *          │+OK               │ │+CONTINUE                 │          │$ENDOFF                  │  │RECEIVE_PSYNC_REPLY│  │    
+ * ┌────────▼──────────┐       │ │                          │          ├─────────────────────────┘  └──┬────────────────┘  │    
+ * │RECEIVE_IP_REPLY   │       │ │                          │          │                               │+CONTINUE          │    
  * └────────┬──────────┘       │ │                          │  ┌───────▼───────────────┐            ┌──▼────────────────┐  │    
- *          │+OK               │ │+CONTINUE                 │  │RDB_CONN_RDB_LOAD      │            │RECEIVE_PSYNC_REPLY│  │    
- * ┌────────▼──────────┐       │ │                          │  └───────┬───────────────┘            └──┬────────────────┘  │    
- * │RECEIVE_IP_REPLY   │       │ │                          │          │Done loading snapshot          │+CONTINUE          │    
- * └────────┬──────────┘       │ │                          │  ┌───────▼───────────────┐            ┌──▼────────────────┐  │    
- *          │+OK               │ │                          │  │RDB_CONN_RDB_LOADED    │            │TRANSFER           │  │    
+ *          │+OK               │ │                          │  │RDB_CONN_RDB_LOAD      │            │TRANSFER           │  │    
  * ┌────────▼──────────┐       │ │                          │  └───────┬───────────────┘            └────┬──────────────┘  │    
- * │RECEIVE_IP_REPLY   │       │ │                          │          │                                 │                 │    
- * └────────┬──────────┘       │ │                          │          │Slave loads local replication    │                 │    
- *          │+OK               │ │                          │          │buffer into memory               │                 │    
- * ┌────────▼────────────────┐ │ │                ┌─────────┼──────────┴─────────────────────────────────┘                 │    
- * │RECEIVE_NO_FULLSYNC_REPLY│ │ │                │         │                                                              │    
- * └─┬────┬──────────────────┘ │ └────┐           │         └──────────────────────────────────────────────────────────────┘    
- *   │+OK │Unrecognized REPLCONF      │           │                                                                             
- * ┌─▼────▼────────────┐       │   ┌──▼───────────▼────┐                                                                        
- * │RECEIVE_CAPA_REPLY ├───────┘   │CONNECTED          │                                                                        
- * └───────────────────┘           └───────────────────┘                                                                                                                                                                                                      
+ * │RECEIVE_IP_REPLY   │       │ │                          │          │Done loading snapshot            │                 │    
+ * └────────┬──────────┘       │ │                          │  ┌───────▼───────────────┐                 │                 │    
+ *          │+OK               │ │                          │  │RDB_CONN_RDB_LOADED    │                 │                 │    
+ * ┌────────▼────────────────┐ │ │                          │  └───────┬───────────────┘                 │                 │    
+ * │RECEIVE_NO_FULLSYNC_REPLY│ │ │                          │          │                                 │                 │    
+ * └─┬────┬──────────────────┘ │ └────┐                     │          │Slave loads local replication    │                 │    
+ *   │+OK │Unrecognized REPLCONF      │                     │          │buffer into memory               │                 │    
+ * ┌─▼────▼────────────┐       │      │            ┌────────┼──────────┴─────────────────────────────────┘                 │    
+ * │RECEIVE_CAPA_REPLY ├───────┘      │            │        │                                                              │    
+ * └───────────────────┘           ┌──▼────────────▼───┐    │                                                              │    
+ *                                 │CONNECTED          │    └──────────────────────────────────────────────────────────────┘    
+ *                                 └───────────────────┘                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
  */ 
 /* This handler fires when the non blocking connect was able to
  * establish a connection with the master. */
@@ -3646,7 +3680,7 @@ void syncWithMaster(connection *conn) {
                 strerror(errno), connGetInfo(conn, conninfo, sizeof(conninfo)));
             goto error;
         }
-        server.repl_rdb_conn_state = REPL_RDB_CONN_SEND_CAPA;
+        server.repl_rdb_conn_state = REPL_RDB_CONN_SEND_HANDSHAKE;
         return;
     }
     /* Setup the non blocking download of the bulk file. */

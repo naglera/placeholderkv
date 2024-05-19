@@ -467,10 +467,11 @@ typedef enum {
  * slaves to remember what to do next. */
 typedef enum {
     REPL_RDB_CONN_STATE_NONE = 0,            /* No active replication */
-    REPL_RDB_CONN_SEND_CAPA,                 /* Send replica cob-channel capabilities */
-    REPL_RDB_CONN_RECEIVE_REPLCONF_REPLY,   /* Wait for REPLCONF reply */
-    REPL_RDB_CONN_RECEIVE_ENDOFF,           /* Wait for $ENDOFF reply */
-    REPL_RDB_CONN_RDB_LOAD,                 /* Loading rdb using rdb channel */
+    REPL_RDB_CONN_SEND_HANDSHAKE,            /* Send handshake sequence to master */
+    REPL_RDB_CONN_RECEIVE_AUTH_REPLY,        /* Wait for AUTH reply */
+    REPL_RDB_CONN_RECEIVE_REPLCONF_REPLY,    /* Wait for REPLCONF reply */
+    REPL_RDB_CONN_RECEIVE_ENDOFF,            /* Wait for $ENDOFF reply */
+    REPL_RDB_CONN_RDB_LOAD,                  /* Loading rdb using rdb channel */
     REPL_RDB_CONN_RDB_LOADED,
 } repl_rdb_conn_state;
 
