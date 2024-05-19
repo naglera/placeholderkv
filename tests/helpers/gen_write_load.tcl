@@ -8,7 +8,7 @@ proc gen_write_load {host port seconds tls key} {
     $r client setname LOAD_HANDLER
     $r select 9
     while 1 {
-        if {$key == 0} {
+        if {$key == ""} {
             $r set [expr rand()] [expr rand()]
         } else {
             $r set $key [expr rand()]

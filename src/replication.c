@@ -1111,12 +1111,6 @@ void syncCommand(client *c) {
         if (masterTryPartialResynchronization(c, psync_offset) == C_OK) {
             server.stat_sync_partial_ok++;
             return; /* No full resync needed, return. */
-        } else if (c->flags & CLIENT_REPL_MAIN_CHANNEL) {
-            serverLog(LL_NOTICE,"Replica %s is marked as main-conn, and psync isn't possible. Full sync will continue with dedicated RDB connection.", replicationGetSlaveName(c));
-            if (connWrite(c->conn,"-FULLSYNCNEEDED\r\n",17) != 17) {
-                freeClientAsync(c);
-            }
-            return;
         } else {
             char *master_replid = c->argv[1]->ptr;
 
@@ -1125,6 +1119,13 @@ void syncCommand(client *c) {
              * resync on purpose when they are not able to partially
              * resync. */
             if (master_replid[0] != '?') server.stat_sync_partial_err++;
+            if (c->flags & CLIENT_REPL_MAIN_CHANNEL) {
+                serverLog(LL_NOTICE,"Replica %s is marked as main-conn, and psync isn't possible. Full sync will continue with dedicated RDB connection.", replicationGetSlaveName(c));
+                if (connWrite(c->conn,"-FULLSYNCNEEDED\r\n",17) != 17) {
+                    freeClientAsync(c);
+                }
+                return;
+            }
         }
     } else {
         /* If a slave uses SYNC, we are dealing with an old implementation

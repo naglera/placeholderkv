@@ -555,7 +555,7 @@ proc find_valgrind_errors {stderr on_termination} {
 # of seconds to the specified the server instance.
 proc start_write_load {host port seconds} {
     set tclsh [info nameofexecutable]
-    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls 0 &
+    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls "" &
 }
 
 # Execute a background process writing only one key for the specified number

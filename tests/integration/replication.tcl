@@ -1585,7 +1585,7 @@ start_server {tags {"repl rdb-channel external:skip"}} {
                 }
             }
             if {$max_retry == 0} {
-                error "assertion:Replica not correctly synchronized"
+                error "assertion:Replica not in sync after 5 seconds"
             }
         }
         stop_write_load $load_handle1
