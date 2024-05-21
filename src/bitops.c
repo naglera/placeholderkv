@@ -37,7 +37,7 @@
 /* Count number of bits set in the binary array pointed by 's' and long
  * 'count' bytes. The implementation of this function is required to
  * work with an input string length up to 512 MB or more (server.proto_max_bulk_len) */
-long long redisPopcount(void *s, long count) {
+long long serverPopcount(void *s, long count) {
     long long bits = 0;
     unsigned char *p = s;
     uint32_t *p4;
@@ -98,7 +98,7 @@ long long redisPopcount(void *s, long count) {
  * no zero bit is found, it returns count*8 assuming the string is zero
  * padded on the right. However if 'bit' is 1 it is possible that there is
  * not a single set bit in the bitmap. In this special case -1 is returned. */
-long long redisBitpos(void *s, unsigned long count, int bit) {
+long long serverBitpos(void *s, unsigned long count, int bit) {
     unsigned long *l;
     unsigned char *c;
     unsigned long skipval, word = 0, one;
@@ -181,7 +181,7 @@ long long redisBitpos(void *s, unsigned long count, int bit) {
 
     /* If we reached this point, there is a bug in the algorithm, since
      * the case of no match is handled as a special case before. */
-    serverPanic("End of redisBitpos() reached.");
+    serverPanic("End of serverBitpos() reached.");
     return 0; /* Just to avoid warnings. */
 }
 
@@ -406,7 +406,7 @@ void printBits(unsigned char *p, unsigned long count) {
 
 /* This helper function used by GETBIT / SETBIT parses the bit offset argument
  * making sure an error is returned if it is negative or if it overflows
- * Redis 512 MB limit for the string value or more (server.proto_max_bulk_len).
+ * the server's 512 MB limit for the string value or more (server.proto_max_bulk_len).
  *
  * If the 'hash' argument is true, and 'bits is positive, then the command
  * will also parse bit offsets prefixed by "#". In such a case the offset
@@ -443,7 +443,7 @@ int getBitOffsetFromArgument(client *c, robj *o, uint64_t *offset, int hash, int
 /* This helper function for BITFIELD parses a bitfield type in the form
  * <sign><bits> where sign is 'u' or 'i' for unsigned and signed, and
  * the bits is a value between 1 and 64. However 64 bits unsigned integers
- * are reported as an error because of current limitations of Redis protocol
+ * are reported as an error because of current limitations of RESP
  * to return unsigned integer values greater than INT64_MAX.
  *
  * On error C_ERR is returned and an error is sent to the client. */
@@ -802,25 +802,12 @@ void bitcountCommand(client *c) {
     int isbit = 0;
     unsigned char first_byte_neg_mask = 0, last_byte_neg_mask = 0;
 
-    /* Lookup, check for type, and return 0 for non existing keys. */
-    if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
-        checkType(c,o,OBJ_STRING)) return;
-    p = getObjectReadOnlyString(o,&strlen,llbuf);
-
     /* Parse start/end range if any. */
     if (c->argc == 4 || c->argc == 5) {
-        long long totlen = strlen;
-        /* Make sure we will not overflow */
-        serverAssert(totlen <= LLONG_MAX >> 3);
         if (getLongLongFromObjectOrReply(c,c->argv[2],&start,NULL) != C_OK)
             return;
         if (getLongLongFromObjectOrReply(c,c->argv[3],&end,NULL) != C_OK)
             return;
-        /* Convert negative indexes */
-        if (start < 0 && end < 0 && start > end) {
-            addReply(c,shared.czero);
-            return;
-        }
         if (c->argc == 5) {
             if (!strcasecmp(c->argv[4]->ptr,"bit")) isbit = 1;
             else if (!strcasecmp(c->argv[4]->ptr,"byte")) isbit = 0;
@@ -828,6 +815,20 @@ void bitcountCommand(client *c) {
                 addReplyErrorObject(c,shared.syntaxerr);
                 return;
             }
+        }
+        /* Lookup, check for type. */
+        o = lookupKeyRead(c->db, c->argv[1]);
+        if (checkType(c, o, OBJ_STRING)) return;
+        p = getObjectReadOnlyString(o,&strlen,llbuf);
+        long long totlen = strlen;
+
+        /* Make sure we will not overflow */
+        serverAssert(totlen <= LLONG_MAX >> 3);
+
+        /* Convert negative indexes */
+        if (start < 0 && end < 0 && start > end) {
+            addReply(c,shared.czero);
+            return;
         }
         if (isbit) totlen <<= 3;
         if (start < 0) start = totlen+start;
@@ -844,6 +845,10 @@ void bitcountCommand(client *c) {
             end >>= 3;
         }
     } else if (c->argc == 2) {
+        /* Lookup, check for type. */
+        o = lookupKeyRead(c->db, c->argv[1]);
+        if (checkType(c, o, OBJ_STRING)) return;
+        p = getObjectReadOnlyString(o,&strlen,llbuf);
         /* The whole string. */
         start = 0;
         end = strlen-1;
@@ -853,13 +858,19 @@ void bitcountCommand(client *c) {
         return;
     }
 
+    /* Return 0 for non existing keys. */
+    if (o == NULL) {
+        addReply(c, shared.czero);
+        return;
+    }
+
     /* Precondition: end >= 0 && end < strlen, so the only condition where
      * zero can be returned is: start > end. */
     if (start > end) {
         addReply(c,shared.czero);
     } else {
         long bytes = (long)(end-start+1);
-        long long count = redisPopcount(p+start,bytes);
+        long long count = serverPopcount(p+start,bytes);
         if (first_byte_neg_mask != 0 || last_byte_neg_mask != 0) {
             unsigned char firstlast[2] = {0, 0};
             /* We may count bits of first byte and last byte which are out of
@@ -867,7 +878,7 @@ void bitcountCommand(client *c) {
             * bits in the range to zero. So these bit will not be excluded. */
             if (first_byte_neg_mask != 0) firstlast[0] = p[start] & first_byte_neg_mask;
             if (last_byte_neg_mask != 0) firstlast[1] = p[end] & last_byte_neg_mask;
-            count -= redisPopcount(firstlast,2);
+            count -= serverPopcount(firstlast,2);
         }
         addReplyLongLong(c,count);
     }
@@ -892,21 +903,8 @@ void bitposCommand(client *c) {
         return;
     }
 
-    /* If the key does not exist, from our point of view it is an infinite
-     * array of 0 bits. If the user is looking for the first clear bit return 0,
-     * If the user is looking for the first set bit, return -1. */
-    if ((o = lookupKeyRead(c->db,c->argv[1])) == NULL) {
-        addReplyLongLong(c, bit ? -1 : 0);
-        return;
-    }
-    if (checkType(c,o,OBJ_STRING)) return;
-    p = getObjectReadOnlyString(o,&strlen,llbuf);
-
     /* Parse start/end range if any. */
     if (c->argc == 4 || c->argc == 5 || c->argc == 6) {
-        long long totlen = strlen;
-        /* Make sure we will not overflow */
-        serverAssert(totlen <= LLONG_MAX >> 3);
         if (getLongLongFromObjectOrReply(c,c->argv[3],&start,NULL) != C_OK)
             return;
         if (c->argc == 6) {
@@ -921,10 +919,22 @@ void bitposCommand(client *c) {
             if (getLongLongFromObjectOrReply(c,c->argv[4],&end,NULL) != C_OK)
                 return;
             end_given = 1;
-        } else {
+        }
+
+        /* Lookup, check for type. */
+        o = lookupKeyRead(c->db, c->argv[1]);
+        if (checkType(c, o, OBJ_STRING)) return;
+        p = getObjectReadOnlyString(o, &strlen, llbuf);
+
+        /* Make sure we will not overflow */
+        long long totlen = strlen;
+        serverAssert(totlen <= LLONG_MAX >> 3);
+
+        if (c->argc < 5) {
             if (isbit) end = (totlen<<3) + 7;
             else end = totlen-1;
         }
+
         if (isbit) totlen <<= 3;
         /* Convert negative indexes */
         if (start < 0) start = totlen+start;
@@ -941,12 +951,25 @@ void bitposCommand(client *c) {
             end >>= 3;
         }
     } else if (c->argc == 3) {
+        /* Lookup, check for type. */
+        o = lookupKeyRead(c->db, c->argv[1]);
+        if (checkType(c,o,OBJ_STRING)) return;
+        p = getObjectReadOnlyString(o,&strlen,llbuf);
+
         /* The whole string. */
         start = 0;
         end = strlen-1;
     } else {
         /* Syntax error. */
         addReplyErrorObject(c,shared.syntaxerr);
+        return;
+    }
+
+    /* If the key does not exist, from our point of view it is an infinite
+     * array of 0 bits. If the user is looking for the first clear bit return 0,
+     * If the user is looking for the first set bit, return -1. */
+    if (o == NULL) {
+        addReplyLongLong(c, bit ? -1 : 0);
         return;
     }
 
@@ -966,7 +989,7 @@ void bitposCommand(client *c) {
                 if (bit) tmpchar = tmpchar & ~last_byte_neg_mask;
                 else tmpchar = tmpchar | last_byte_neg_mask;
             }
-            pos = redisBitpos(&tmpchar,1,bit);
+            pos = serverBitpos(&tmpchar,1,bit);
             /* If there are no more bytes or we get valid pos, we can exit early */
             if (bytes == 1 || (pos != -1 && pos != 8)) goto result;
             start++;
@@ -975,7 +998,7 @@ void bitposCommand(client *c) {
         /* If the last byte has not bits in the range, we should exclude it */
         long curbytes = bytes - (last_byte_neg_mask ? 1 : 0);
         if (curbytes > 0) {
-            pos = redisBitpos(p+start,curbytes,bit);
+            pos = serverBitpos(p+start,curbytes,bit);
             /* If there is no more bytes or we get valid pos, we can exit early */
             if (bytes == curbytes || (pos != -1 && pos != (long long)curbytes<<3)) goto result;
             start += curbytes;
@@ -983,14 +1006,14 @@ void bitposCommand(client *c) {
         }
         if (bit) tmpchar = p[end] & ~last_byte_neg_mask;
         else tmpchar = p[end] | last_byte_neg_mask;
-        pos = redisBitpos(&tmpchar,1,bit);
+        pos = serverBitpos(&tmpchar,1,bit);
 
     result:
         /* If we are looking for clear bits, and the user specified an exact
          * range with start-end, we can't consider the right of the range as
          * zero padded (as we do when no explicit end is given).
          *
-         * So if redisBitpos() returns the first bit outside the range,
+         * So if serverBitpos() returns the first bit outside the range,
          * we return -1 to the caller, to mean, in the specified range there
          * is not a single "0" bit. */
         if (end_given && bit == 0 && pos == (long long)bytes<<3) {

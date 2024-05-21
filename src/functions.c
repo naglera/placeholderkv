@@ -33,6 +33,8 @@
 #include "adlist.h"
 #include "atomicvar.h"
 
+#define LOAD_TIMEOUT_MS 500
+
 typedef enum {
     restorePolicy_Flush, restorePolicy_Append, restorePolicy_Replace
 } restorePolicy;
@@ -57,11 +59,11 @@ struct functionsLibCtx {
     dict *engines_stats; /* Per engine statistics */
 };
 
-typedef struct functionsLibMataData {
+typedef struct functionsLibMetaData {
     sds engine;
     sds name;
     sds code;
-} functionsLibMataData;
+} functionsLibMetaData;
 
 dictType engineDictType = {
         dictSdsCaseHash,       /* hash function */
@@ -116,10 +118,7 @@ dictType librariesDictType = {
 /* Dictionary of engines */
 static dict *engines = NULL;
 
-/* Libraries Ctx.
- * Contains the dictionary that map a library name to library object,
- * Contains the dictionary that map a function name to function object,
- * and the cache memory used by all the functions */
+/* Libraries Ctx. */
 static functionsLibCtx *curr_functions_lib_ctx = NULL;
 
 static size_t functionMallocSize(functionInfo *fi) {
@@ -212,12 +211,12 @@ void functionsLibCtxSwapWithCurrent(functionsLibCtx *new_lib_ctx) {
 }
 
 /* return the current functions ctx */
-functionsLibCtx* functionsLibCtxGetCurrent() {
+functionsLibCtx* functionsLibCtxGetCurrent(void) {
     return curr_functions_lib_ctx;
 }
 
 /* Create a new functions ctx */
-functionsLibCtx* functionsLibCtxCreate() {
+functionsLibCtx* functionsLibCtxCreate(void) {
     functionsLibCtx *ret = zmalloc(sizeof(functionsLibCtx));
     ret->libraries = dictCreate(&librariesDictType);
     ret->functions = dictCreate(&functionDictType);
@@ -405,7 +404,7 @@ done:
 /* Register an engine, should be called once by the engine on startup and give the following:
  *
  * - engine_name - name of the engine to register
- * - engine_ctx - the engine ctx that should be used by Redis to interact with the engine */
+ * - engine_ctx - the engine ctx that should be used by the server to interact with the engine */
 int functionsRegisterEngine(const char *engine_name, engine *engine) {
     sds engine_name_sds = sdsnew(engine_name);
     if (dictFetchValue(engines, engine_name_sds)) {
@@ -497,7 +496,6 @@ static void functionListReplyFlags(client *c, functionInfo *fi) {
  * Return general information about all the libraries:
  * * Library name
  * * The engine used to run the Library
- * * Library description
  * * Functions list
  * * Library code (if WITHCODE is given)
  *
@@ -679,7 +677,6 @@ void fcallroCommand(client *c) {
  * is saved separately with the following information:
  * * Library name
  * * Engine name
- * * Library description
  * * Library code
  * RDB_OPCODE_FUNCTION2 is saved before each library to present
  * that the payload is a library.
@@ -838,7 +835,6 @@ void functionHelpCommand(client *c) {
 "    Return general information on all the libraries:",
 "    * Library name",
 "    * The engine used to run the Library",
-"    * Library description",
 "    * Functions list",
 "    * Library code (if WITHCODE is given)",
 "    It also possible to get only function that matches a pattern using LIBRARYNAME argument.",
@@ -890,11 +886,9 @@ static int functionsVerifyName(sds name) {
     return C_OK;
 }
 
-int functionExtractLibMetaData(sds payload, functionsLibMataData *md, sds *err) {
+int functionExtractLibMetaData(sds payload, functionsLibMetaData *md, sds *err) {
     sds name = NULL;
-    sds desc = NULL;
     sds engine = NULL;
-    sds code = NULL;
     if (strncmp(payload, "#!", 2) != 0) {
         *err = sdsnew("Missing library metadata");
         return C_ERR;
@@ -946,14 +940,12 @@ int functionExtractLibMetaData(sds payload, functionsLibMataData *md, sds *err) 
 
 error:
     if (name) sdsfree(name);
-    if (desc) sdsfree(desc);
     if (engine) sdsfree(engine);
-    if (code) sdsfree(code);
     sdsfreesplitres(parts, numparts);
     return C_ERR;
 }
 
-void functionFreeLibMetaData(functionsLibMataData *md) {
+void functionFreeLibMetaData(functionsLibMetaData *md) {
     if (md->code) sdsfree(md->code);
     if (md->name) sdsfree(md->name);
     if (md->engine) sdsfree(md->engine);
@@ -961,12 +953,12 @@ void functionFreeLibMetaData(functionsLibMataData *md) {
 
 /* Compile and save the given library, return the loaded library name on success
  * and NULL on failure. In case on failure the err out param is set with relevant error message */
-sds functionsCreateWithLibraryCtx(sds code, int replace, sds* err, functionsLibCtx *lib_ctx) {
+sds functionsCreateWithLibraryCtx(sds code, int replace, sds* err, functionsLibCtx *lib_ctx, size_t timeout) {
     dictIterator *iter = NULL;
     dictEntry *entry = NULL;
     functionLibInfo *new_li = NULL;
     functionLibInfo *old_li = NULL;
-    functionsLibMataData md = {0};
+    functionsLibMetaData md = {0};
     if (functionExtractLibMetaData(code, &md, err) != C_OK) {
         return NULL;
     }
@@ -995,7 +987,7 @@ sds functionsCreateWithLibraryCtx(sds code, int replace, sds* err, functionsLibC
     }
 
     new_li = engineLibraryCreate(md.name, ei, code);
-    if (engine->create(engine->engine_ctx, new_li, md.code, err) != C_OK) {
+    if (engine->create(engine->engine_ctx, new_li, md.code, timeout, err) != C_OK) {
         goto error;
     }
 
@@ -1063,7 +1055,11 @@ void functionLoadCommand(client *c) {
     robj *code = c->argv[argc_pos];
     sds err = NULL;
     sds library_name = NULL;
-    if (!(library_name = functionsCreateWithLibraryCtx(code->ptr, replace, &err, curr_functions_lib_ctx)))
+    size_t timeout = LOAD_TIMEOUT_MS;
+    if (mustObeyClient(c)) {
+        timeout = 0;
+    }
+    if (!(library_name = functionsCreateWithLibraryCtx(code->ptr, replace, &err, curr_functions_lib_ctx, timeout)))
     {
         addReplyErrorSds(c, err);
         return;
@@ -1075,22 +1071,22 @@ void functionLoadCommand(client *c) {
 }
 
 /* Return memory usage of all the engines combine */
-unsigned long functionsMemory() {
+unsigned long functionsMemory(void) {
     dictIterator *iter = dictGetIterator(engines);
     dictEntry *entry = NULL;
-    size_t engines_nemory = 0;
+    size_t engines_memory = 0;
     while ((entry = dictNext(iter))) {
         engineInfo *ei = dictGetVal(entry);
         engine *engine = ei->engine;
-        engines_nemory += engine->get_used_memory(engine->engine_ctx);
+        engines_memory += engine->get_used_memory(engine->engine_ctx);
     }
     dictReleaseIterator(iter);
 
-    return engines_nemory;
+    return engines_memory;
 }
 
 /* Return memory overhead of all the engines combine */
-unsigned long functionsMemoryOverhead() {
+unsigned long functionsMemoryOverhead(void) {
     size_t memory_overhead = dictMemUsage(engines);
     memory_overhead += dictMemUsage(curr_functions_lib_ctx->functions);
     memory_overhead += sizeof(functionsLibCtx);
@@ -1101,25 +1097,25 @@ unsigned long functionsMemoryOverhead() {
 }
 
 /* Returns the number of functions */
-unsigned long functionsNum() {
+unsigned long functionsNum(void) {
     return dictSize(curr_functions_lib_ctx->functions);
 }
 
-unsigned long functionsLibNum() {
+unsigned long functionsLibNum(void) {
     return dictSize(curr_functions_lib_ctx->libraries);
 }
 
-dict* functionsLibGet() {
+dict* functionsLibGet(void) {
     return curr_functions_lib_ctx->libraries;
 }
 
-size_t functionsLibCtxfunctionsLen(functionsLibCtx *functions_ctx) {
+size_t functionsLibCtxFunctionsLen(functionsLibCtx *functions_ctx) {
     return dictSize(functions_ctx->functions);
 }
 
 /* Initialize engine data structures.
  * Should be called once on server initialization */
-int functionsInit() {
+int functionsInit(void) {
     engines = dictCreate(&engineDictType);
 
     if (luaEngineInitEngine() != C_OK) {

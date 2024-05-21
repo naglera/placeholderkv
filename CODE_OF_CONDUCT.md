@@ -26,7 +26,7 @@ Examples of unacceptable behavior include:
 advances of any kind
 * Trolling, insulting or derogatory comments, and personal or political attacks
 * Public or private harassment
-* Publishing others’ private information, such as a physical or email
+* Publishing others' private information, such as a physical or email
 address, without their explicit permission
 * Other conduct which could reasonably be considered inappropriate in a
 professional setting
@@ -49,7 +49,7 @@ representative at an online or offline event.
 Enforcement
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-this email address: redis@redis.io.
+this email address: placeholderkv@gmail.com.
 All complaints will be reviewed and investigated promptly and fairly.
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.
@@ -89,7 +89,7 @@ Attribution
 This Code of Conduct is adapted from the Contributor Covenant,
 version 2.0, available at
 https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
-Community Impact Guidelines were inspired by Mozilla’s code of conduct
+Community Impact Guidelines were inspired by Mozilla's code of conduct
 enforcement ladder.
 For answers to common questions about this code of conduct, see the FAQ at
 https://www.contributor-covenant.org/faq. Translations are available at

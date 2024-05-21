@@ -2,9 +2,10 @@
 #include "bio.h"
 #include "atomicvar.h"
 #include "functions.h"
+#include "cluster.h"
 
-static redisAtomic size_t lazyfree_objects = 0;
-static redisAtomic size_t lazyfreed_objects = 0;
+static serverAtomic size_t lazyfree_objects = 0;
+static serverAtomic size_t lazyfreed_objects = 0;
 
 /* Release objects from the lazyfree thread. It's just decrRefCount()
  * updating the count of objects to release. */
@@ -19,12 +20,12 @@ void lazyfreeFreeObject(void *args[]) {
  * database which was substituted with a fresh one in the main thread
  * when the database was logically deleted. */
 void lazyfreeFreeDatabase(void *args[]) {
-    dict *ht1 = (dict *) args[0];
-    dict *ht2 = (dict *) args[1];
+    kvstore *da1 = args[0];
+    kvstore *da2 = args[1];
 
-    size_t numkeys = dictSize(ht1);
-    dictRelease(ht1);
-    dictRelease(ht2);
+    size_t numkeys = kvstoreSize(da1);
+    kvstoreRelease(da1);
+    kvstoreRelease(da2);
     atomicDecr(lazyfree_objects,numkeys);
     atomicIncr(lazyfreed_objects,numkeys);
 }
@@ -38,11 +39,22 @@ void lazyFreeTrackingTable(void *args[]) {
     atomicIncr(lazyfreed_objects,len);
 }
 
+/* Release the error stats rax tree. */
+void lazyFreeErrors(void *args[]) {
+    rax *errors = args[0];
+    size_t len = errors->numele;
+    raxFreeWithCallback(errors, zfree);
+    atomicDecr(lazyfree_objects,len);
+    atomicIncr(lazyfreed_objects,len);
+}
+
 /* Release the lua_scripts dict. */
 void lazyFreeLuaScripts(void *args[]) {
     dict *lua_scripts = args[0];
+    list *lua_scripts_lru_list = args[1];
+    lua_State *lua = args[2];
     long long len = dictSize(lua_scripts);
-    dictRelease(lua_scripts);
+    freeLuaScriptsSync(lua_scripts, lua_scripts_lru_list, lua);
     atomicDecr(lazyfree_objects,len);
     atomicIncr(lazyfreed_objects,len);
 }
@@ -50,7 +62,7 @@ void lazyFreeLuaScripts(void *args[]) {
 /* Release the functions ctx. */
 void lazyFreeFunctionsCtx(void *args[]) {
     functionsLibCtx *functions_lib_ctx = args[0];
-    size_t len = functionsLibCtxfunctionsLen(functions_lib_ctx);
+    size_t len = functionsLibCtxFunctionsLen(functions_lib_ctx);
     functionsLibCtxFree(functions_lib_ctx);
     atomicDecr(lazyfree_objects,len);
     atomicIncr(lazyfreed_objects,len);
@@ -82,7 +94,7 @@ size_t lazyfreeGetFreedObjectsCount(void) {
     return aux;
 }
 
-void lazyfreeResetStats() {
+void lazyfreeResetStats(void) {
     atomicSet(lazyfreed_objects,0);
 }
 
@@ -160,7 +172,7 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     size_t free_effort = lazyfreeGetFreeEffort(key,obj,dbid);
     /* Note that if the object is shared, to reclaim it now it is not
      * possible. This rarely happens, however sometimes the implementation
-     * of parts of the Redis core may call incrRefCount() to protect
+     * of parts of the server core may call incrRefCount() to protect
      * objects, and then call dbDelete(). */
     if (free_effort > LAZYFREE_THRESHOLD && obj->refcount == 1) {
         atomicIncr(lazyfree_objects,1);
@@ -170,15 +182,21 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     }
 }
 
-/* Empty a Redis DB asynchronously. What the function does actually is to
+/* Empty a DB asynchronously. What the function does actually is to
  * create a new empty set of hash tables and scheduling the old ones for
  * lazy freeing. */
-void emptyDbAsync(redisDb *db) {
-    dict *oldht1 = db->dict, *oldht2 = db->expires;
-    db->dict = dictCreate(&dbDictType);
-    db->expires = dictCreate(&dbExpiresDictType);
-    atomicIncr(lazyfree_objects,dictSize(oldht1));
-    bioCreateLazyFreeJob(lazyfreeFreeDatabase,2,oldht1,oldht2);
+void emptyDbAsync(serverDb *db) {
+    int slot_count_bits = 0;
+    int flags = KVSTORE_ALLOCATE_DICTS_ON_DEMAND;
+    if (server.cluster_enabled) {
+        slot_count_bits = CLUSTER_SLOT_MASK_BITS;
+        flags |= KVSTORE_FREE_EMPTY_DICTS;
+    }
+    kvstore *oldkeys = db->keys, *oldexpires = db->expires;
+    db->keys = kvstoreCreate(&dbDictType, slot_count_bits, flags);
+    db->expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
+    atomicIncr(lazyfree_objects, kvstoreSize(oldkeys));
+    bioCreateLazyFreeJob(lazyfreeFreeDatabase, 2, oldkeys, oldexpires);
 }
 
 /* Free the key tracking table.
@@ -193,20 +211,33 @@ void freeTrackingRadixTreeAsync(rax *tracking) {
     }
 }
 
-/* Free lua_scripts dict, if the dict is huge enough, free it in async way. */
-void freeLuaScriptsAsync(dict *lua_scripts) {
+/* Free the error stats rax tree.
+ * If the rax tree is huge enough, free it in async way. */
+void freeErrorsRadixTreeAsync(rax *errors) {
+    /* Because this rax has only keys and no values so we use numnodes. */
+    if (errors->numnodes > LAZYFREE_THRESHOLD) {
+        atomicIncr(lazyfree_objects,errors->numele);
+        bioCreateLazyFreeJob(lazyFreeErrors,1,errors);
+    } else {
+        raxFreeWithCallback(errors, zfree);
+    }
+}
+
+/* Free lua_scripts dict and lru list, if the dict is huge enough, free them in async way.
+ * Close lua interpreter, if there are a lot of lua scripts, close it in async way. */
+void freeLuaScriptsAsync(dict *lua_scripts, list *lua_scripts_lru_list, lua_State *lua) {
     if (dictSize(lua_scripts) > LAZYFREE_THRESHOLD) {
         atomicIncr(lazyfree_objects,dictSize(lua_scripts));
-        bioCreateLazyFreeJob(lazyFreeLuaScripts,1,lua_scripts);
+        bioCreateLazyFreeJob(lazyFreeLuaScripts,3,lua_scripts,lua_scripts_lru_list,lua);
     } else {
-        dictRelease(lua_scripts);
+        freeLuaScriptsSync(lua_scripts, lua_scripts_lru_list, lua);
     }
 }
 
 /* Free functions ctx, if the functions ctx contains enough functions, free it in async way. */
 void freeFunctionsAsync(functionsLibCtx *functions_lib_ctx) {
-    if (functionsLibCtxfunctionsLen(functions_lib_ctx) > LAZYFREE_THRESHOLD) {
-        atomicIncr(lazyfree_objects,functionsLibCtxfunctionsLen(functions_lib_ctx));
+    if (functionsLibCtxFunctionsLen(functions_lib_ctx) > LAZYFREE_THRESHOLD) {
+        atomicIncr(lazyfree_objects,functionsLibCtxFunctionsLen(functions_lib_ctx));
         bioCreateLazyFreeJob(lazyFreeFunctionsCtx,1,functions_lib_ctx);
     } else {
         functionsLibCtxFree(functions_lib_ctx);

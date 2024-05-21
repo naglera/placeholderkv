@@ -34,7 +34,7 @@
 #include "pqsort.h"
 
 /* Things exported from t_zset.c only for geo.c, since it is the only other
- * part of Redis that requires close zset introspection. */
+ * part of the server that requires close zset introspection. */
 unsigned char *zzlFirstInRange(unsigned char *zl, zrangespec *range);
 int zslValueLteMax(double value, zrangespec *spec);
 
@@ -246,7 +246,7 @@ int geoWithinShape(GeoShape *shape, double score, double *xy, double *distance) 
     return C_OK;
 }
 
-/* Query a Redis sorted set to extract all the elements between 'min' and
+/* Query a sorted set to extract all the elements between 'min' and
  * 'max', appending them into the array of geoPoint structures 'geoArray'.
  * The command returns the number of elements added to the array.
  *
@@ -300,7 +300,7 @@ int geoGetPointsInRange(robj *zobj, double min, double max, GeoShape *shape, geo
         zskiplist *zsl = zs->zsl;
         zskiplistNode *ln;
 
-        if ((ln = zslFirstInRange(zsl, &range)) == NULL) {
+        if ((ln = zslNthInRange(zsl, &range, 0)) == NULL) {
             /* Nothing exists starting at our min.  No results. */
             return 0;
         }
@@ -490,7 +490,7 @@ void geoaddCommand(client *c) {
         GeoHashBits hash;
         geohashEncodeWGS84(xy[0], xy[1], GEO_STEP_MAX, &hash);
         GeoHashFix52Bits bits = geohashAlign52Bits(hash);
-        robj *score = createObject(OBJ_STRING, sdsfromlonglong(bits));
+        robj *score = createStringObjectFromLongLongWithSds(bits);
         robj *val = c->argv[longidx + i * 3 + 2];
         argv[longidx+i*2] = score;
         argv[longidx+1+i*2] = val;
@@ -513,7 +513,7 @@ void geoaddCommand(client *c) {
 #define GEOSEARCHSTORE (1<<4)   /* GEOSEARCHSTORE just accept STOREDIST option */
 
 /* GEORADIUS key x y radius unit [WITHDIST] [WITHHASH] [WITHCOORD] [ASC|DESC]
- *                               [COUNT count [ANY]] [STORE key] [STOREDIST key]
+ *                               [COUNT count [ANY]] [STORE key|STOREDIST key]
  * GEORADIUSBYMEMBER key member radius unit ... options ...
  * GEOSEARCH key [FROMMEMBER member] [FROMLONLAT long lat] [BYRADIUS radius unit]
  *               [BYBOX width height unit] [WITHCOORD] [WITHDIST] [WITHASH] [COUNT count [ANY]] [ASC|DESC]
@@ -690,7 +690,7 @@ void georadiusGeneric(client *c, int srcKeyIndex, int flags) {
     }
 
     if (any && !count) {
-        addReplyErrorFormat(c, "the ANY argument requires COUNT argument");
+        addReplyError(c, "the ANY argument requires COUNT argument");
         return;
     }
 

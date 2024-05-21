@@ -32,7 +32,7 @@
 
 #include "ae.h"
 #include "anet.h"
-#include "redisassert.h"
+#include "serverassert.h"
 
 #include <stdio.h>
 #include <sys/time.h>
@@ -149,6 +149,8 @@ void aeDeleteEventLoop(aeEventLoop *eventLoop) {
     aeTimeEvent *next_te, *te = eventLoop->timeEventHead;
     while (te) {
         next_te = te->next;
+        if (te->finalizerProc)
+            te->finalizerProc(eventLoop, te->clientData);
         zfree(te);
         te = next_te;
     }
@@ -256,7 +258,7 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
  * If there are no timers, -1 is returned.
  *
  * Note that's O(N) since time events are unsorted.
- * Possible optimizations (not needed by Redis so far, but...):
+ * Possible optimizations (not needed so far, but...):
  * 1) Insert the event in order, so that the nearest is just the head.
  *    Much better but still insertion or deletion of timers is O(N).
  * 2) Use a skiplist to have this operation as O(1) and insertion as O(log(N)).
@@ -333,7 +335,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             processed++;
             now = getMonotonicUs();
             if (retval != AE_NOMORE) {
-                te->when = now + retval * 1000;
+                te->when = now + (monotime)retval * 1000;
             } else {
                 te->id = AE_DELETED_EVENT_ID;
             }
@@ -343,8 +345,8 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     return processed;
 }
 
-/* Process every pending time event, then every pending file event
- * (that may be registered by time event callbacks just processed).
+/* Process every pending file event, then every pending time event
+ * (that may be registered by file event callbacks just processed).
  * Without special flags the function sleeps until some file event
  * fires, or when the next time event occurs (if any).
  *

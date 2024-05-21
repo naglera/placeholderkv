@@ -149,7 +149,7 @@ void execCommand(client *c) {
     int j;
     robj **orig_argv;
     int orig_argc, orig_argv_len;
-    struct redisCommand *orig_cmd;
+    struct serverCommand *orig_cmd;
 
     if (!(c->flags & CLIENT_MULTI)) {
         addReplyError(c,"EXEC without MULTI");
@@ -274,7 +274,7 @@ void execCommand(client *c) {
 typedef struct watchedKey {
     listNode node;
     robj *key;
-    redisDb *db;
+    serverDb *db;
     client *client;
     unsigned expired:1; /* Flag that we're watching an already expired key. */
 } watchedKey;
@@ -302,6 +302,8 @@ void watchForKey(client *c, robj *key) {
     listIter li;
     listNode *ln;
     watchedKey *wk;
+
+    if (listLength(c->watched_keys) == 0) server.watching_clients++;
 
     /* Check if we are already watching for this key */
     listRewind(c->watched_keys,&li);
@@ -353,6 +355,7 @@ void unwatchAllKeys(client *c) {
         decrRefCount(wk->key);
         zfree(wk);
     }
+    server.watching_clients--;
 }
 
 /* Iterates over the watched_keys list and looks for an expired key. Keys which
@@ -374,7 +377,7 @@ int isWatchedKeyExpired(client *c) {
 
 /* "Touch" a key, so that if this key is being WATCHed by some client the
  * next EXEC will fail. */
-void touchWatchedKey(redisDb *db, robj *key) {
+void touchWatchedKey(serverDb *db, robj *key) {
     list *clients;
     listIter li;
     listNode *ln;
@@ -387,14 +390,14 @@ void touchWatchedKey(redisDb *db, robj *key) {
     /* Check if we are already watching for this key */
     listRewind(clients,&li);
     while((ln = listNext(&li))) {
-        watchedKey *wk = redis_member2struct(watchedKey, node, ln);
+        watchedKey *wk = server_member2struct(watchedKey, node, ln);
         client *c = wk->client;
 
         if (wk->expired) {
             /* The key was already expired when WATCH was called. */
             if (db == wk->db &&
                 equalStringObjects(key, wk->key) &&
-                dictFind(db->dict, key->ptr) == NULL)
+                dbFind(db, key->ptr) == NULL)
             {
                 /* Already expired key is deleted, so logically no change. Clear
                  * the flag. Deleted keys are not flagged as expired. */
@@ -422,7 +425,7 @@ void touchWatchedKey(redisDb *db, robj *key) {
  * replaced_with: for SWAPDB, the WATCH should be invalidated if
  * the key exists in either of them, and skipped only if it
  * doesn't exist in both. */
-void touchAllWatchedKeysInDb(redisDb *emptied, redisDb *replaced_with) {
+void touchAllWatchedKeysInDb(serverDb *emptied, serverDb *replaced_with) {
     listIter li;
     listNode *ln;
     dictEntry *de;
@@ -432,17 +435,17 @@ void touchAllWatchedKeysInDb(redisDb *emptied, redisDb *replaced_with) {
     dictIterator *di = dictGetSafeIterator(emptied->watched_keys);
     while((de = dictNext(di)) != NULL) {
         robj *key = dictGetKey(de);
-        int exists_in_emptied = dictFind(emptied->dict, key->ptr) != NULL;
+        int exists_in_emptied = dbFind(emptied, key->ptr) != NULL;
         if (exists_in_emptied ||
-            (replaced_with && dictFind(replaced_with->dict, key->ptr)))
+            (replaced_with && dbFind(replaced_with, key->ptr) != NULL))
         {
             list *clients = dictGetVal(de);
             if (!clients) continue;
             listRewind(clients,&li);
             while((ln = listNext(&li))) {
-                watchedKey *wk = redis_member2struct(watchedKey, node, ln);
+                watchedKey *wk = server_member2struct(watchedKey, node, ln);
                 if (wk->expired) {
-                    if (!replaced_with || !dictFind(replaced_with->dict, key->ptr)) {
+                    if (!replaced_with || !dbFind(replaced_with, key->ptr)) {
                         /* Expired key now deleted. No logical change. Clear the
                          * flag. Deleted keys are not flagged as expired. */
                         wk->expired = 0;

@@ -190,7 +190,7 @@
 #include "ziplist.h"
 #include "config.h"
 #include "endianconv.h"
-#include "redisassert.h"
+#include "serverassert.h"
 
 #define ZIP_END 255         /* Special "end of ziplist" entry. */
 #define ZIP_BIG_PREVLEN 254 /* ZIP_BIG_PREVLEN - 1 is the max number of bytes of
@@ -1686,7 +1686,7 @@ unsigned int ziplistRandomPairsUnique(unsigned char *zl, unsigned int count, zip
     return picked;
 }
 
-#ifdef REDIS_TEST
+#ifdef SERVER_TEST
 #include <sys/time.h>
 #include "adlist.h"
 #include "sds.h"
@@ -1694,7 +1694,7 @@ unsigned int ziplistRandomPairsUnique(unsigned char *zl, unsigned int count, zip
 
 #define debug(f, ...) { if (DEBUG) printf(f, __VA_ARGS__); }
 
-static unsigned char *createList() {
+static unsigned char *createList(void) {
     unsigned char *zl = ziplistNew();
     zl = ziplistPush(zl, (unsigned char*)"foo", 3, ZIPLIST_TAIL);
     zl = ziplistPush(zl, (unsigned char*)"quux", 4, ZIPLIST_TAIL);
@@ -1703,7 +1703,7 @@ static unsigned char *createList() {
     return zl;
 }
 
-static unsigned char *createIntList() {
+static unsigned char *createIntList(void) {
     unsigned char *zl = ziplistNew();
     char buf[32];
 

@@ -42,7 +42,7 @@
 
 #include "listpack.h"
 #include "listpack_malloc.h"
-#include "redisassert.h"
+#include "serverassert.h"
 #include "util.h"
 
 #define LP_HDR_SIZE 6       /* 32 bit total len + 16 bit number of elements. */
@@ -165,7 +165,7 @@ int lpSafeToAdd(unsigned char* lp, size_t add) {
  *
  * -----------------------------------------------------------------------------
  *
- * Credits: this function was adapted from the Redis source code, file
+ * Credits: this function was adapted from the Redis OSS source code, file
  * "utils.c", function string2ll(), and is copyright:
  *
  * Copyright(C) 2011, Pieter Noordhuis
@@ -1679,7 +1679,7 @@ void lpRepr(unsigned char *lp) {
     printf("{end}\n\n");
 }
 
-#ifdef REDIS_TEST
+#ifdef SERVER_TEST
 
 #include <sys/time.h>
 #include "adlist.h"
@@ -1693,7 +1693,7 @@ char *mixlist[] = {"hello", "foo", "quux", "1024"};
 char *intlist[] = {"4294967296", "-100", "100", "128000", 
                    "non integer", "much much longer non integer"};
 
-static unsigned char *createList() {
+static unsigned char *createList(void) {
     unsigned char *lp = lpNew(0);
     lp = lpAppend(lp, (unsigned char*)mixlist[1], strlen(mixlist[1]));
     lp = lpAppend(lp, (unsigned char*)mixlist[2], strlen(mixlist[2]));
@@ -1702,7 +1702,7 @@ static unsigned char *createList() {
     return lp;
 }
 
-static unsigned char *createIntList() {
+static unsigned char *createIntList(void) {
     unsigned char *lp = lpNew(0);
     lp = lpAppend(lp, (unsigned char*)intlist[2], strlen(intlist[2]));
     lp = lpAppend(lp, (unsigned char*)intlist[3], strlen(intlist[3]));

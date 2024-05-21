@@ -29,8 +29,8 @@
  */
 
 
-#ifndef __REDIS_RIO_H
-#define __REDIS_RIO_H
+#ifndef VALKEY_RIO_H
+#define VALKEY_RIO_H
 
 #include <stdio.h>
 #include <stdint.h>
@@ -97,6 +97,14 @@ struct _rio {
             off_t pos;
             sds buf;
         } fd;
+        /* Multiple connections target (used to write to N sockets). */
+        struct {
+            connection **conns;  /* Connections */
+            int *state;         /* Error state of each fd. 0 (if ok) or errno. */
+            int numconns;
+            off_t pos;
+            sds buf;
+        } connset;
     } io;
 };
 
@@ -175,11 +183,13 @@ size_t rioWriteBulkString(rio *r, const char *buf, size_t len);
 size_t rioWriteBulkLongLong(rio *r, long long l);
 size_t rioWriteBulkDouble(rio *r, double d);
 
-struct redisObject;
-int rioWriteBulkObject(rio *r, struct redisObject *obj);
+struct serverObject;
+int rioWriteBulkObject(rio *r, struct serverObject *obj);
 
 void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
 void rioSetAutoSync(rio *r, off_t bytes);
 void rioSetReclaimCache(rio *r, int enabled); 
 uint8_t rioCheckType(rio *r);
+void rioInitWithConnset(rio *r, connection **conns, int numconns);
+void rioFreeConnset(rio *r);
 #endif

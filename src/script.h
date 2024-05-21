@@ -32,9 +32,9 @@
 
 /*
  * Script.c unit provides an API for functions and eval 
- * to interact with Redis. Interaction includes mostly
+ * to interact with the server. Interaction includes mostly
  * executing commands, but also functionalities like calling
- * Redis back on long scripts or check if the script was killed.
+ * the server back on long scripts or check if the script was killed.
  *
  * The interaction is done using a scriptRunCtx object that
  * need to be created by the user and initialized using scriptPrepareForRun.
@@ -44,7 +44,7 @@
  *    acl, cluster, read only run, ...)
  * 2. Set Resp
  * 3. Set Replication method (AOF/REPLICATION/NONE)
- * 4. Call Redis back to on long running scripts to allow Redis reply
+ * 4. Call the server back to on long running scripts to allow the server reply
  *    to clients and perform script kill
  */
 
@@ -74,6 +74,7 @@ struct scriptRunCtx {
     int flags;
     int repl_flags;
     monotime start_time;
+    int slot;
 };
 
 /* Scripts flags */
@@ -100,12 +101,12 @@ int scriptSetRepl(scriptRunCtx *r_ctx, int repl);
 void scriptCall(scriptRunCtx *r_ctx, sds *err);
 int scriptInterrupt(scriptRunCtx *r_ctx);
 void scriptKill(client *c, int is_eval);
-int scriptIsRunning();
-const char* scriptCurrFunction();
-int scriptIsEval();
-int scriptIsTimedout();
-client* scriptGetClient();
-client* scriptGetCaller();
-long long scriptRunDuration();
+int scriptIsRunning(void);
+const char* scriptCurrFunction(void);
+int scriptIsEval(void);
+int scriptIsTimedout(void);
+client* scriptGetClient(void);
+client* scriptGetCaller(void);
+long long scriptRunDuration(void);
 
 #endif /* __SCRIPT_H_ */

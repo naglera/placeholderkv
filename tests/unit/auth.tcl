@@ -47,6 +47,7 @@ start_server {tags {"auth external:skip"} overrides {requirepass foobar}} {
     }
 }
 
+foreach rdbchann {yes no} {
 start_server {tags {"auth_binary_password external:skip"}} {
     test {AUTH fails when binary password is wrong} {
         r config set requirepass "abc\x00def"
@@ -65,13 +66,14 @@ start_server {tags {"auth_binary_password external:skip"}} {
         set master_port [srv -1 port]
         set slave [srv 0 client]
 
-        test {MASTERAUTH test with binary password} {
+        test "MASTERAUTH test with binary password rdbchannel = $rdbchann" {
             $master config set requirepass "abc\x00def"
-
+            $master config set repl-rdb-channel $rdbchann
             # Configure the replica with masterauth
             set loglines [count_log_lines 0]
-            $slave slaveof $master_host $master_port
             $slave config set masterauth "abc"
+            $slave config set repl-rdb-channel $rdbchann
+            $slave slaveof $master_host $master_port
 
             # Verify replica is not able to sync with master
             wait_for_log_messages 0 {"*Unable to AUTH to MASTER*"} $loglines 1000 10
@@ -86,4 +88,5 @@ start_server {tags {"auth_binary_password external:skip"}} {
             }
         }
     }
+}
 }

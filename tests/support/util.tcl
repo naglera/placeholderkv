@@ -62,8 +62,8 @@ proc sanitizer_errors_from_file {filename} {
         }
 
         # GCC UBSAN output does not contain 'Sanitizer' but 'runtime error'.
-        if {[string match {*runtime error*} $log] ||
-            [string match {*Sanitizer*} $log]} {
+        if {[string match {*runtime error*} $line] ||
+            [string match {*Sanitizer*} $line]} {
             return $log
         }
     }
@@ -542,7 +542,7 @@ proc find_valgrind_errors {stderr on_termination} {
         return ""
     }
 
-    # Look for the absence of a leak free summary (happens when redis isn't terminated properly).
+    # Look for the absence of a leak free summary (happens when the server isn't terminated properly).
     if {(![regexp -- {definitely lost: 0 bytes} $buf] &&
          ![regexp -- {no leaks are possible} $buf])} {
         return $buf
@@ -552,10 +552,18 @@ proc find_valgrind_errors {stderr on_termination} {
 }
 
 # Execute a background process writing random data for the specified number
-# of seconds to the specified Redis instance.
+# of seconds to the specified the server instance.
 proc start_write_load {host port seconds} {
     set tclsh [info nameofexecutable]
-    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls &
+    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls "" &
+}
+
+# Execute a background process writing only one key for the specified number
+# of seconds to the specified Redis instance. This load handler is useful for
+# tests which requires heavy replication stream but no memory load. 
+proc start_one_key_write_load {host port seconds key} {
+    set tclsh [info nameofexecutable]
+    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls $key &
 }
 
 # Stop a process generating write load executed with start_write_load.
@@ -588,7 +596,7 @@ proc lshuffle {list} {
 }
 
 # Execute a background process writing complex data for the specified number
-# of ops to the specified Redis instance.
+# of ops to the specified server instance.
 proc start_bg_complex_data {host port db ops} {
     set tclsh [info nameofexecutable]
     exec $tclsh tests/helpers/bg_complex_data.tcl $host $port $db $ops $::tls &
@@ -601,17 +609,25 @@ proc stop_bg_complex_data {handle} {
 
 # Write num keys with the given key prefix and value size (in bytes). If idx is
 # given, it's the index (AKA level) used with the srv procedure and it specifies
-# to which Redis instance to write the keys.
-proc populate {num {prefix key:} {size 3} {idx 0} {prints false}} {
+# to which server instance to write the keys.
+proc populate {num {prefix key:} {size 3} {idx 0} {prints false} {expires 0}} {
     r $idx deferred 1
     if {$num > 16} {set pipeline 16} else {set pipeline $num}
     set val [string repeat A $size]
     for {set j 0} {$j < $pipeline} {incr j} {
-        r $idx set $prefix$j $val
+        if {$expires > 0} {
+            r $idx set $prefix$j $val ex $expires
+        } else {
+            r $idx set $prefix$j $val
+        }
         if {$prints} {puts $j}
     }
     for {} {$j < $num} {incr j} {
-        r $idx set $prefix$j $val
+        if {$expires > 0} {
+            r $idx set $prefix$j $val ex $expires
+        } else {
+            r $idx set $prefix$j $val
+        }
         r $idx read
         if {$prints} {puts $j}
     }
@@ -697,11 +713,11 @@ proc generate_fuzzy_traffic_on_key {key duration} {
         # find a random command for our key type
         set cmd_idx [expr {int(rand()*[llength $cmds])}]
         set cmd [lindex $cmds $cmd_idx]
-        # get the command details from redis
+        # get the command details from the server
         if { [ catch {
             set cmd_info [lindex [r command info $cmd] 0]
         } err ] } {
-            # if we failed, it means redis crashed after the previous command
+            # if we failed, it means the server crashed after the previous command
             return $sent
         }
         # try to build a valid command argument
@@ -917,6 +933,14 @@ proc wait_for_blocked_clients_count {count {maxtries 100} {delay 10} {idx 0}} {
     }
 }
 
+proc wait_for_watched_clients_count {count {maxtries 100} {delay 10} {idx 0}} {
+    wait_for_condition $maxtries $delay  {
+        [s $idx watching_clients] == $count
+    } else {
+        fail "Timeout waiting for watched clients"
+    }
+}
+
 proc read_from_aof {fp} {
     # Input fp is a blocking binary file descriptor of an opened AOF file.
     if {[gets $fp count] == -1} return ""
@@ -1006,7 +1030,7 @@ proc init_large_mem_vars {} {
     }
 }
 
-# Utility function to write big argument into redis client connection
+# Utility function to write big argument into a server client connection
 proc write_big_bulk {size {prefix ""} {skip_read no}} {
     init_large_mem_vars
 
@@ -1105,4 +1129,32 @@ proc lmap args {
         lappend temp [uplevel 1 $body]
     }
     set temp
+}
+
+proc format_command {args} {
+    set cmd "*[llength $args]\r\n"
+    foreach a $args {
+        append cmd "$[string length $a]\r\n$a\r\n"
+    }
+    set _ $cmd
+}
+
+# Returns whether or not the system supports stack traces
+proc system_backtrace_supported {} {
+    set system_name [string tolower [exec uname -s]]
+    if {$system_name eq {darwin}} {
+        return 1
+    } elseif {$system_name ne {linux}} {
+        return 0
+    }
+
+    # libmusl does not support backtrace. Also return 0 on
+    # static binaries (ldd exit code 1) where we can't detect libmusl
+    catch {
+        set ldd [exec ldd src/valkey-server]
+        if {![string match {*libc.*musl*} $ldd]} {
+            return 1
+        }
+    }
+    return 0
 }

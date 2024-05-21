@@ -64,7 +64,8 @@ start_server {tags {"scripting"}} {
     } {hello1}
 
     test {FUNCTION - test replace argument with failure keeps old libraries} {
-         catch {r function create LUA test REPLACE {error}}
+        catch {r function load REPLACE [get_function_code LUA test test {error}]} e
+        assert_match {ERR Error compiling function*} $e
         r fcall test 0
     } {hello1}
 
@@ -234,7 +235,7 @@ start_server {tags {"scripting"}} {
     } {x}
 
     test {FUNCTION - test function kill} {
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         r config set busy-reply-threshold 10
         r function load REPLACE [get_function_code lua test test {local a = 1 while true do a = a + 1 end}]
         $rd fcall test 0
@@ -248,7 +249,7 @@ start_server {tags {"scripting"}} {
     }
 
     test {FUNCTION - test script kill not working on function} {
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         r config set busy-reply-threshold 10
         r function load REPLACE [get_function_code lua test test {local a = 1 while true do a = a + 1 end}]
         $rd fcall test 0
@@ -263,7 +264,7 @@ start_server {tags {"scripting"}} {
     }
 
     test {FUNCTION - test function kill not working on eval} {
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         r config set busy-reply-threshold 10
         $rd eval {local a = 1 while true do a = a + 1 end} 0
         after 200
@@ -1105,7 +1106,7 @@ start_server {tags {"scripting"}} {
         set _ {}
     } {} {external:skip}
 
-    test {FUNCTION - redis version api} {
+    test {FUNCTION - valkey version api} {
         r FUNCTION load replace {#!lua name=test
             local version = redis.REDIS_VERSION_NUM
 

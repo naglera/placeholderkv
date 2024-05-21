@@ -72,8 +72,10 @@ void disableTracking(client *c) {
         raxStart(&ri,c->client_tracking_prefixes);
         raxSeek(&ri,"^",NULL,0);
         while(raxNext(&ri)) {
-            bcastState *bs = raxFind(PrefixTable,ri.key,ri.key_len);
-            serverAssert(bs != raxNotFound);
+            void *result;
+            int found = raxFind(PrefixTable,ri.key,ri.key_len,&result);
+            serverAssert(found);
+            bcastState *bs = result;
             raxRemove(bs->clients,(unsigned char*)&c,sizeof(c),NULL);
             /* Was it the last client? Remove the prefix from the
              * table. */
@@ -153,14 +155,17 @@ int checkPrefixCollisionsOrReply(client *c, robj **prefixes, size_t numprefix) {
 /* Set the client 'c' to track the prefix 'prefix'. If the client 'c' is
  * already registered for the specified prefix, no operation is performed. */
 void enableBcastTrackingForPrefix(client *c, char *prefix, size_t plen) {
-    bcastState *bs = raxFind(PrefixTable,(unsigned char*)prefix,plen);
+    void *result;
+    bcastState *bs;
     /* If this is the first client subscribing to such prefix, create
      * the prefix in the table. */
-    if (bs == raxNotFound) {
+    if (!raxFind(PrefixTable,(unsigned char*)prefix,plen,&result)) {
         bs = zmalloc(sizeof(*bs));
         bs->keys = raxNew();
         bs->clients = raxNew();
         raxInsert(PrefixTable,(unsigned char*)prefix,plen,bs,NULL);
+    } else {
+        bs = result;
     }
     if (raxTryInsert(bs->clients,(unsigned char*)&c,sizeof(c),NULL,NULL)) {
         if (c->client_tracking_prefixes == NULL)
@@ -211,7 +216,7 @@ void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **pr
 /* This function is called after the execution of a readonly command in the
  * case the client 'c' has keys tracking enabled and the tracking is not
  * in BCAST mode. It will populate the tracking invalidation table according
- * to the keys the user fetched, so that Redis will know what are the clients
+ * to the keys the user fetched, so that the server will know what are the clients
  * that should receive an invalidation message with certain groups of keys
  * are modified. */
 void trackingRememberKeys(client *tracking, client *executing) {
@@ -240,12 +245,15 @@ void trackingRememberKeys(client *tracking, client *executing) {
     for(int j = 0; j < numkeys; j++) {
         int idx = keys[j].pos;
         sds sdskey = executing->argv[idx]->ptr;
-        rax *ids = raxFind(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey));
-        if (ids == raxNotFound) {
+        void *result;
+        rax *ids;
+        if (!raxFind(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey),&result)) {
             ids = raxNew();
             int inserted = raxTryInsert(TrackingTable,(unsigned char*)sdskey,
                                         sdslen(sdskey),ids, NULL);
             serverAssert(inserted == 1);
+        } else {
+            ids = result;
         }
         if (raxTryInsert(ids,(unsigned char*)&tracking->id,sizeof(tracking->id),NULL,NULL))
             TrackingTableTotalItems++;
@@ -260,7 +268,7 @@ void trackingRememberKeys(client *tracking, client *executing) {
  *
  * In case the 'proto' argument is non zero, the function will assume that
  * 'keyname' points to a buffer of 'keylen' bytes already expressed in the
- * form of Redis RESP protocol. This is used for:
+ * form of RESP protocol. This is used for:
  * - In BCAST mode, to send an array of invalidated keys to all
  *   applicable clients
  * - Following a flush command, to send a single RESP NULL to indicate
@@ -323,7 +331,7 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
     if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
 }
 
-/* This function is called when a key is modified in Redis and in the case
+/* This function is called when a key is modified in the server and in the case
  * we have at least one client with the BCAST mode enabled.
  * Its goal is to set the key in the right broadcast state if the key
  * matches one or more prefixes in the prefix table. Later when we
@@ -347,7 +355,7 @@ void trackingRememberKeyToBroadcast(client *c, char *keyname, size_t keylen) {
     raxStop(&ri);
 }
 
-/* This function is called from signalModifiedKey() or other places in Redis
+/* This function is called from signalModifiedKey() or other places in the server
  * when a key changes value. In the context of keys tracking, our task here is
  * to send a notification to every client that may have keys about such caching
  * slot.
@@ -358,7 +366,7 @@ void trackingRememberKeyToBroadcast(client *c, char *keyname, size_t keylen) {
  *
  * The last argument 'bcast' tells the function if it should also schedule
  * the key for broadcasting to clients in BCAST mode. This is the case when
- * the function is called from the Redis core once a key is modified, however
+ * the function is called from the server core once a key is modified, however
  * we also call the function in order to evict keys in the key table in case
  * of memory pressure: in that case the key didn't really change, so we want
  * just to notify the clients that are in the table for this key, that would
@@ -372,8 +380,9 @@ void trackingInvalidateKey(client *c, robj *keyobj, int bcast) {
     if (bcast && raxSize(PrefixTable) > 0)
         trackingRememberKeyToBroadcast(c,(char *)key,keylen);
 
-    rax *ids = raxFind(TrackingTable,key,keylen);
-    if (ids == raxNotFound) return;
+    void *result;
+    if (!raxFind(TrackingTable,key,keylen,&result)) return;
+    rax *ids = result;
 
     raxIterator ri;
     raxStart(&ri,ids);
@@ -449,7 +458,7 @@ void trackingHandlePendingKeyInvalidations(void) {
     listEmpty(server.tracking_pending_keys);
 }
 
-/* This function is called when one or all the Redis databases are
+/* This function is called when one or all of the databases are
  * flushed. Caching keys are not specific for each DB but are global: 
  * currently what we do is send a special notification to clients with 
  * tracking enabled, sending a RESP NULL, which means, "all the keys", 
@@ -495,12 +504,12 @@ void trackingInvalidateKeysOnFlush(int async) {
     }
 }
 
-/* Tracking forces Redis to remember information about which client may have
+/* Tracking forces the server to remember information about which client may have
  * certain keys. In workloads where there are a lot of reads, but keys are
  * hardly modified, the amount of information we have to remember server side
  * could be a lot, with the number of keys being totally not bound.
  *
- * So Redis allows the user to configure a maximum number of keys for the
+ * So the server allows the user to configure a maximum number of keys for the
  * invalidation table. This function makes sure that we don't go over the
  * specified fill rate: if we are over, we can just evict information about
  * a random key, and send invalidation messages to clients like if the key was
@@ -544,7 +553,7 @@ void trackingLimitUsedSlots(void) {
     timeout_counter++;
 }
 
-/* Generate Redis protocol for an array containing all the key names
+/* Generate RESP for an array containing all the key names
  * in the 'keys' radix tree. If the client is not NULL, the list will not
  * include keys that were modified the last time by this client, in order
  * to implement the NOLOOP option.

@@ -56,7 +56,7 @@ start_server {tags {"maxmemory" "external:skip"}} {
             init_test $client_eviction
 
             for {set j 0} {$j < 20} {incr j} {
-                set rr [redis_deferring_client]
+                set rr [valkey_deferring_client]
                 lappend clients $rr
             }
             
@@ -85,7 +85,7 @@ start_server {tags {"maxmemory" "external:skip"}} {
             init_test $client_eviction
             
             for {set j 0} {$j < 30} {incr j} {
-                set rr [redis_deferring_client]
+                set rr [valkey_deferring_client]
                 lappend clients $rr
             }
 
@@ -272,7 +272,7 @@ start_server {tags {"maxmemory external:skip"}} {
                 incr numkeys
             }
             # Now we add the same number of volatile keys already added.
-            # We expect Redis to evict only volatile keys in order to make
+            # We expect the server to evict only volatile keys in order to make
             # space.
             set err 0
             for {set j 0} {$j < $numkeys} {incr j} {
@@ -349,12 +349,12 @@ proc test_slave_buffers {test_name cmd_count payload_len limit_memory pipeline} 
             }
 
             # put the slave to sleep
-            set rd_slave [redis_deferring_client]
+            set rd_slave [valkey_deferring_client]
             pause_process $slave_pid
 
             # send some 10mb worth of commands that don't increase the memory usage
             if {$pipeline == 1} {
-                set rd_master [redis_deferring_client -1]
+                set rd_master [valkey_deferring_client -1]
                 for {set k 0} {$k < $cmd_count} {incr k} {
                     $rd_master setrange key:0 0 [string repeat A $payload_len]
                 }
@@ -406,7 +406,7 @@ proc test_slave_buffers {test_name cmd_count payload_len limit_memory pipeline} 
 
 # test that slave buffer are counted correctly
 # we wanna use many small commands, and we don't wanna wait long
-# so we need to use a pipeline (redis_deferring_client)
+# so we need to use a pipeline (valkey_deferring_client)
 # that may cause query buffer to fill and induce eviction, so we disable it
 test_slave_buffers {slave buffer are counted correctly} 1000000 10 0 1
 
@@ -421,16 +421,21 @@ start_server {tags {"maxmemory external:skip"}} {
         r config set maxmemory-policy allkeys-random
 
         # Next rehash size is 8192, that will eat 64k memory
-        populate 4096 "" 1
+        populate 4095 "" 1
 
         set used [s used_memory]
         set limit [expr {$used + 10*1024}]
         r config set maxmemory $limit
+
+        # Adding a key to meet the 1:1 radio.
+        r set k0 v0
+        # The dict has reached 4096, it can be resized in tryResizeHashTables in cron,
+        # or we add a key to let it check whether it can be resized.
         r set k1 v1
         # Next writing command will trigger evicting some keys if last
         # command trigger DB dict rehash
         r set k2 v2
-        # There must be 4098 keys because redis doesn't evict keys.
+        # There must be 4098 keys because the server doesn't evict keys.
         r dbsize
     } {4098}
 }
@@ -445,7 +450,7 @@ start_server {tags {"maxmemory external:skip"}} {
         # 10 clients listening on tracking messages
         set clients {}
         for {set j 0} {$j < 10} {incr j} {
-            lappend clients [redis_deferring_client]
+            lappend clients [valkey_deferring_client]
         }
         foreach rd $clients {
             $rd HELLO 3
@@ -569,5 +574,22 @@ start_server {tags {"maxmemory" "external:skip"}} {
 
         r config set maxmemory 0
         r config set maxmemory-policy noeviction
+    }
+}
+
+start_server {tags {"maxmemory" "external:skip"}} {
+    test {lru/lfu value of the key just added} {
+        r config set maxmemory-policy allkeys-lru
+        r set foo a
+        assert {[r object idletime foo] <= 2}
+        r del foo
+        r set foo 1
+        r get foo
+        assert {[r object idletime foo] <= 2}
+
+        r config set maxmemory-policy allkeys-lfu
+        r del foo 
+        r set foo a
+        assert {[r object freq foo] == 5}
     }
 }

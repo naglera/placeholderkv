@@ -8,7 +8,7 @@ tags "modules" {
 
         test {Test clients connection / disconnection hooks} {
             for {set j 0} {$j < 2} {incr j} {
-                set rd1 [redis_deferring_client]
+                set rd1 [valkey_deferring_client]
                 $rd1 close
             }
             assert {[r hooks.event_count client-connected] > 1}
@@ -16,7 +16,7 @@ tags "modules" {
         }
 
         test {Test module client change event for blocked client} {
-            set rd [redis_deferring_client]
+            set rd [valkey_deferring_client]
             # select db other than 0
             $rd select 1
             # block on key
@@ -308,6 +308,14 @@ tags "modules" {
         # look into the log file of the server that just exited
         test {Test shutdown hook} {
             assert_equal [string match {*module-event-shutdown*} [exec tail -5 < $replica_stdout]] 1
+        }
+    }
+
+    start_server {} {
+        test {OnLoad failure will handle un-registration} {
+            catch {r module load $testmodule noload}
+            r flushall
+            r ping
         }
     }
 }

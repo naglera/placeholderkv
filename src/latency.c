@@ -1,5 +1,5 @@
 /* The latency monitor allows to easily observe the sources of latency
- * in a Redis instance using the LATENCY command. Different latency
+ * in an instance using the LATENCY command. Different latency
  * sources are monitored, like disk I/O, execution of commands, fork
  * system call, and so forth.
  *
@@ -198,7 +198,7 @@ void analyzeLatencyForEvent(char *event, struct latencyStats *ls) {
     if (ls->samples) ls->mad = sum / ls->samples;
 }
 
-/* Create a human readable report of latency events for this Redis instance. */
+/* Create a human readable report of latency events for this instance. */
 sds createLatencyReport(void) {
     sds report = sdsempty();
     int advise_better_vm = 0;       /* Better virtual machines. */
@@ -279,7 +279,7 @@ sds createLatencyReport(void) {
 
         /* Potentially commands. */
         if (!strcasecmp(event,"command")) {
-            if (server.slowlog_log_slower_than < 0) {
+            if (server.slowlog_log_slower_than < 0 || server.slowlog_max_len == 0) {
                 advise_slowlog_enabled = 1;
                 advices++;
             } else if (server.slowlog_log_slower_than/1000 >
@@ -493,10 +493,10 @@ void fillCommandCDF(client *c, struct hdr_histogram* histogram) {
 void latencyAllCommandsFillCDF(client *c, dict *commands, int *command_with_data) {
     dictIterator *di = dictGetSafeIterator(commands);
     dictEntry *de;
-    struct redisCommand *cmd;
+    struct serverCommand *cmd;
 
     while((de = dictNext(di)) != NULL) {
-        cmd = (struct redisCommand *) dictGetVal(de);
+        cmd = (struct serverCommand *) dictGetVal(de);
         if (cmd->latency_histogram) {
             addReplyBulkCBuffer(c, cmd->fullname, sdslen(cmd->fullname));
             fillCommandCDF(c, cmd->latency_histogram);
@@ -516,7 +516,7 @@ void latencySpecificCommandsFillCDF(client *c) {
     void *replylen = addReplyDeferredLen(c);
     int command_with_data = 0;
     for (int j = 2; j < c->argc; j++){
-        struct redisCommand *cmd = lookupCommandBySds(c->argv[j]->ptr);
+        struct serverCommand *cmd = lookupCommandBySds(c->argv[j]->ptr);
         /* If the command does not exist we skip the reply */
         if (cmd == NULL) {
             continue;
@@ -533,7 +533,7 @@ void latencySpecificCommandsFillCDF(client *c) {
             dictIterator *di = dictGetSafeIterator(cmd->subcommands_dict);
 
             while ((de = dictNext(di)) != NULL) {
-                struct redisCommand *sub = dictGetVal(de);
+                struct serverCommand *sub = dictGetVal(de);
                 if (sub->latency_histogram) {
                     addReplyBulkCBuffer(c, sub->fullname, sdslen(sub->fullname));
                     fillCommandCDF(c, sub->latency_histogram);
@@ -726,3 +726,14 @@ nodataerr:
         "No samples available for event '%s'", (char*) c->argv[2]->ptr);
 }
 
+void durationAddSample(int type, monotime duration) {
+    if (type >= EL_DURATION_TYPE_NUM) {
+        return;
+    }
+    durationStats* ds = &server.duration_stats[type];
+    ds->cnt++;
+    ds->sum += duration;
+    if (duration > ds->max) {
+        ds->max = duration;
+    }
+}

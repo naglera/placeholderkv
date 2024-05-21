@@ -127,7 +127,7 @@ int rdbLoadType(rio *rdb) {
 }
 
 /* This is only used to load old databases stored with the RDB_OPCODE_EXPIRETIME
- * opcode. New versions of Redis store using the RDB_OPCODE_EXPIRETIME_MS
+ * opcode. New versions of the server store using the RDB_OPCODE_EXPIRETIME_MS
  * opcode. On error -1 is returned, however this could be a valid time, so
  * to check for loading errors the caller should call rioGetReadError() after
  * calling this function. */
@@ -137,20 +137,20 @@ time_t rdbLoadTime(rio *rdb) {
     return (time_t)t32;
 }
 
-int rdbSaveMillisecondTime(rio *rdb, long long t) {
+ssize_t rdbSaveMillisecondTime(rio *rdb, long long t) {
     int64_t t64 = (int64_t) t;
     memrev64ifbe(&t64); /* Store in little endian. */
     return rdbWriteRaw(rdb,&t64,8);
 }
 
 /* This function loads a time from the RDB file. It gets the version of the
- * RDB because, unfortunately, before Redis 5 (RDB version 9), the function
+ * RDB because, unfortunately, before Redis OSS 5 (RDB version 9), the function
  * failed to convert data to/from little endian, so RDB files with keys having
  * expires could not be shared between big endian and little endian systems
  * (because the expire time will be totally wrong). The fix for this is just
  * to call memrev64ifbe(), however if we fix this for all the RDB versions,
  * this call will introduce an incompatibility for big endian systems:
- * after upgrading to Redis version 5 they will no longer be able to load their
+ * after upgrading to Redis OSS version 5 they will no longer be able to load their
  * own old RDB files. Because of that, we instead fix the function only for new
  * RDB versions, and load older RDB versions as we used to do in the past,
  * allowing big endian systems to load their own old RDB files.
@@ -250,7 +250,7 @@ int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr) {
 
 /* This is like rdbLoadLenByRef() but directly returns the value read
  * from the RDB stream, signaling an error by returning RDB_LENERR
- * (since it is a too large count to be applicable in any Redis data
+ * (since it is a too large count to be applicable in any server data
  * structure). */
 uint64_t rdbLoadLen(rio *rdb, int *isencoded) {
     uint64_t len;
@@ -326,7 +326,7 @@ void *rdbLoadIntegerObject(rio *rdb, int enctype, int flags, size_t *lenptr) {
     } else if (encode) {
         return createStringObjectFromLongLongForValue(val);
     } else {
-        return createObject(OBJ_STRING,sdsfromlonglong(val));
+        return createStringObjectFromLongLongWithSds(val);
     }
 }
 
@@ -490,7 +490,7 @@ ssize_t rdbSaveLongLongAsStringObject(rio *rdb, long long value) {
     return nwritten;
 }
 
-/* Like rdbSaveRawString() gets a Redis object instead. */
+/* Like rdbSaveRawString() gets an Object instead. */
 ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
     /* Avoid to decode the object, then encode it again, if the
      * object is already integer encoded. */
@@ -505,13 +505,13 @@ ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
 /* Load a string object from an RDB file according to flags:
  *
  * RDB_LOAD_NONE (no flags): load an RDB object, unencoded.
- * RDB_LOAD_ENC: If the returned type is a Redis object, try to
+ * RDB_LOAD_ENC: If the returned type is an Object, try to
  *               encode it in a special way to be more memory
  *               efficient. When this flag is passed the function
  *               no longer guarantees that obj->ptr is an SDS string.
  * RDB_LOAD_PLAIN: Return a plain string allocated with zmalloc()
- *                 instead of a Redis object with an sds in it.
- * RDB_LOAD_SDS: Return an SDS string instead of a Redis object.
+ *                 instead of an Object with an sds in it.
+ * RDB_LOAD_SDS: Return an SDS string instead of an Object.
  *
  * On I/O error NULL is returned.
  */
@@ -583,7 +583,7 @@ robj *rdbLoadEncodedStringObject(rio *rdb) {
  * 254: + inf
  * 255: - inf
  */
-int rdbSaveDoubleValue(rio *rdb, double val) {
+ssize_t rdbSaveDoubleValue(rio *rdb, double val) {
     unsigned char buf[128];
     int len;
 
@@ -809,7 +809,7 @@ size_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
     return nwritten;
 }
 
-/* Save a Redis object.
+/* Save an Object.
  * Returns -1 on error, number of bytes written on success. */
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
     ssize_t n = 0, nwritten = 0;
@@ -1079,7 +1079,7 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
         }
     } else if (o->type == OBJ_MODULE) {
         /* Save a module-specific value. */
-        RedisModuleIO io;
+        ValkeyModuleIO io;
         moduleValue *mv = o->ptr;
         moduleType *mt = mv->type;
 
@@ -1195,7 +1195,7 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     int aof_base = (rdbflags & RDBFLAGS_AOF_PREAMBLE) != 0;
 
     /* Add a few fields about the state when the RDB was created. */
-    if (rdbSaveAuxFieldStrStr(rdb,"redis-ver",REDIS_VERSION) == -1) return -1;
+    if (rdbSaveAuxFieldStrStr(rdb,"valkey-ver",VALKEY_VERSION) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"redis-bits",redis_bits) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"ctime",time(NULL)) == -1) return -1;
     if (rdbSaveAuxFieldStrInt(rdb,"used-mem",zmalloc_used_memory()) == -1) return -1;
@@ -1215,7 +1215,7 @@ int rdbSaveInfoAuxFields(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
 
 ssize_t rdbSaveSingleModuleAux(rio *rdb, int when, moduleType *mt) {
     /* Save a module-specific aux value. */
-    RedisModuleIO io;
+    ValkeyModuleIO io;
     int retval = 0;
     moduleInitIOContext(io,mt,rdb,NULL,-1);
 
@@ -1298,17 +1298,16 @@ werr:
 }
 
 ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
-    dictIterator *di;
     dictEntry *de;
     ssize_t written = 0;
     ssize_t res;
+    kvstoreIterator *kvs_it = NULL;
     static long long info_updated_time = 0;
     char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" :  "RDB";
 
-    redisDb *db = server.db + dbid;
-    dict *d = db->dict;
-    if (dictSize(d) == 0) return 0;
-    di = dictGetSafeIterator(d);
+    serverDb *db = server.db + dbid;
+    unsigned long long int db_size = kvstoreSize(db->keys);
+    if (db_size == 0) return 0;
 
     /* Write the SELECT DB opcode */
     if ((res = rdbSaveType(rdb,RDB_OPCODE_SELECTDB)) < 0) goto werr;
@@ -1317,9 +1316,7 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     written += res;
 
     /* Write the RESIZE DB opcode. */
-    uint64_t db_size, expires_size;
-    db_size = dictSize(db->dict);
-    expires_size = dictSize(db->expires);
+    unsigned long long expires_size = kvstoreSize(db->expires);
     if ((res = rdbSaveType(rdb,RDB_OPCODE_RESIZEDB)) < 0) goto werr;
     written += res;
     if ((res = rdbSaveLen(rdb,db_size)) < 0) goto werr;
@@ -1327,8 +1324,23 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     if ((res = rdbSaveLen(rdb,expires_size)) < 0) goto werr;
     written += res;
 
+    kvs_it = kvstoreIteratorInit(db->keys);
+    int last_slot = -1;
     /* Iterate this DB writing every entry */
-    while((de = dictNext(di)) != NULL) {
+    while ((de = kvstoreIteratorNext(kvs_it)) != NULL) {
+        int curr_slot = kvstoreIteratorGetCurrentDictIndex(kvs_it);
+        /* Save slot info. */
+        if (server.cluster_enabled && curr_slot != last_slot) {
+            if ((res = rdbSaveType(rdb, RDB_OPCODE_SLOT_INFO)) < 0) goto werr;
+            written += res;
+            if ((res = rdbSaveLen(rdb, curr_slot)) < 0) goto werr;
+            written += res;
+            if ((res = rdbSaveLen(rdb, kvstoreDictSize(db->keys, curr_slot))) < 0) goto werr;
+            written += res;
+            if ((res = rdbSaveLen(rdb, kvstoreDictSize(db->expires, curr_slot))) < 0) goto werr;
+            written += res;
+            last_slot = curr_slot;
+        }
         sds keystr = dictGetKey(de);
         robj key, *o = dictGetVal(de);
         long long expire;
@@ -1356,17 +1368,16 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
             }
         }
     }
-
-    dictReleaseIterator(di);
+    kvstoreIteratorRelease(kvs_it);
     return written;
 
 werr:
-    dictReleaseIterator(di);
+    if (kvs_it) kvstoreIteratorRelease(kvs_it);
     return -1;
 }
 
 /* Produces a dump of the database in RDB format sending it to the specified
- * Redis I/O channel. On success C_OK is returned, otherwise C_ERR
+ * I/O channel. On success C_OK is returned, otherwise C_ERR
  * is returned and part of the output, or all the output, can be
  * missing because of I/O errors.
  *
@@ -1384,7 +1395,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     snprintf(magic,sizeof(magic),"REDIS%04d",RDB_VERSION);
     if (rdbWriteRaw(rdb,magic,9) == -1) goto werr;
     if (rdbSaveInfoAuxFields(rdb,rdbflags,rsi) == -1) goto werr;
-    if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, REDISMODULE_AUX_BEFORE_RDB) == -1) goto werr;
+    if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_BEFORE_RDB) == -1) goto werr;
 
     /* save functions */
     if (!(req & SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
@@ -1396,7 +1407,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
         }
     }
 
-    if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, REDISMODULE_AUX_AFTER_RDB) == -1) goto werr;
+    if (!(req & SLAVE_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_AFTER_RDB) == -1) goto werr;
 
     /* EOF opcode */
     if (rdbSaveType(rdb,RDB_OPCODE_EOF) == -1) goto werr;
@@ -1413,7 +1424,8 @@ werr:
     return C_ERR;
 }
 
-/* This is just a wrapper to rdbSaveRio() that additionally adds a prefix
+/* This helper function is only used for diskless replication. 
+ * This is just a wrapper to rdbSaveRio() that additionally adds a prefix
  * and a suffix to the generated RDB dump. The prefix is:
  *
  * $EOF:<40 bytes unguessable hex string>\r\n
@@ -1430,7 +1442,7 @@ int rdbSaveRioWithEOFMark(int req, rio *rdb, int *error, rdbSaveInfo *rsi) {
     if (rioWrite(rdb,"$EOF:",5) == 0) goto werr;
     if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr;
     if (rioWrite(rdb,"\r\n",2) == 0) goto werr;
-    if (rdbSaveRio(req,rdb,error,RDBFLAGS_NONE,rsi) == C_ERR) goto werr;
+    if (rdbSaveRio(req,rdb,error,RDBFLAGS_REPLICATION,rsi) == C_ERR) goto werr;
     if (rioWrite(rdb,eofmark,RDB_EOF_MARK_SIZE) == 0) goto werr;
     stopSaving(1);
     return C_OK;
@@ -1517,7 +1529,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
 
-    startSaving(RDBFLAGS_NONE);
+    startSaving(rdbflags);
     snprintf(tmpfile,256,"temp-%d.rdb", (int) getpid());
 
     if (rdbSaveInternal(req,tmpfile,rsi,rdbflags) != C_OK) {
@@ -1565,12 +1577,12 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     server.dirty_before_bgsave = server.dirty;
     server.lastbgsave_try = time(NULL);
 
-    if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
+    if ((childpid = serverFork(CHILD_TYPE_RDB)) == 0) {
         int retval;
 
         /* Child */
-        redisSetProcTitle("redis-rdb-bgsave");
-        redisSetCpuAffinity(server.bgsave_cpulist);
+        serverSetProcTitle("redis-rdb-bgsave");
+        serverSetCpuAffinity(server.bgsave_cpulist);
         retval = rdbSave(req, filename,rsi,rdbflags);
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
@@ -1620,7 +1632,7 @@ void rdbRemoveTempFile(pid_t childpid, int from_signal) {
 /* This function is called by rdbLoadObject() when the code is in RDB-check
  * mode and we find a module value of type 2 that can be parsed without
  * the need of the actual module. The value is parsed for errors, finally
- * a dummy redis object is returned just to conform to the API. */
+ * a dummy Object is returned just to conform to the API. */
 robj *rdbLoadCheckModuleValue(rio *rdb, char *modulename) {
     uint64_t opcode;
     while((opcode = rdbLoadLen(rdb,NULL)) != RDB_MODULE_OPCODE_EOF) {
@@ -1818,7 +1830,7 @@ int lpValidateIntegrityAndDups(unsigned char *lp, size_t size, int deep, int pai
     return ret;
 }
 
-/* Load a Redis object of the specified type from the specified file.
+/* Load an Object of the specified type from the specified file.
  * On success a newly allocated object is returned, otherwise NULL.
  * When the function returns NULL and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the type of error that occurred */
@@ -1844,15 +1856,13 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
     if (rdbtype == RDB_TYPE_STRING) {
         /* Read string value */
         if ((o = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
-        o = tryObjectEncoding(o);
+        o = tryObjectEncodingEx(o, 0);
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
-                            server.list_compress_depth);
+        o = createQuicklistObject(server.list_max_listpack_size, server.list_compress_depth);
 
         /* Load every single element of the list */
         while(len--) {
@@ -2162,9 +2172,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
         if (len == 0) goto emptykey;
 
-        o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
-                            server.list_compress_depth);
+        o = createQuicklistObject(server.list_max_listpack_size, server.list_compress_depth);
         uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
         while (len--) {
             unsigned char *lp;
@@ -2269,7 +2277,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                     return NULL;
                 }
                 /* Convert to ziplist encoded hash. This must be deprecated
-                 * when loading dumps created by Redis 2.4 gets deprecated. */
+                 * when loading dumps created by Redis OSS 2.4 gets deprecated. */
                 {
                     unsigned char *lp = lpNew(0);
                     unsigned char *zi = zipmapRewind(o->ptr);
@@ -2740,13 +2748,14 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                         decrRefCount(o);
                         return NULL;
                     }
-                    streamNACK *nack = raxFind(cgroup->pel,rawid,sizeof(rawid));
-                    if (nack == raxNotFound) {
+                    void *result;
+                    if (!raxFind(cgroup->pel,rawid,sizeof(rawid),&result)) {
                         rdbReportCorruptRDB("Consumer entry not found in "
                                                 "group global PEL");
                         decrRefCount(o);
                         return NULL;
                     }
+                    streamNACK *nack = result;
 
                     /* Set the NACK consumer, that was left to NULL when
                      * loading the global PEL. Then set the same shared
@@ -2803,7 +2812,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
             rdbReportCorruptRDB("The RDB file contains module data I can't load: no matching module type '%s'", name);
             return NULL;
         }
-        RedisModuleIO io;
+        ValkeyModuleIO io;
         robj keyobj;
         initStaticStringObject(keyobj,key);
         moduleInitIOContext(io,mt,rdb,&keyobj,dbid);
@@ -2870,12 +2879,12 @@ void startLoading(size_t size, int rdbflags, int async) {
     /* Fire the loading modules start event. */
     int subevent;
     if (rdbflags & RDBFLAGS_AOF_PREAMBLE)
-        subevent = REDISMODULE_SUBEVENT_LOADING_AOF_START;
+        subevent = VALKEYMODULE_SUBEVENT_LOADING_AOF_START;
     else if(rdbflags & RDBFLAGS_REPLICATION)
-        subevent = REDISMODULE_SUBEVENT_LOADING_REPL_START;
+        subevent = VALKEYMODULE_SUBEVENT_LOADING_REPL_START;
     else
-        subevent = REDISMODULE_SUBEVENT_LOADING_RDB_START;
-    moduleFireServerEvent(REDISMODULE_EVENT_LOADING,subevent,NULL);
+        subevent = VALKEYMODULE_SUBEVENT_LOADING_RDB_START;
+    moduleFireServerEvent(VALKEYMODULE_EVENT_LOADING,subevent,NULL);
 }
 
 /* Mark that we are loading in the global state and setup the fields
@@ -2913,10 +2922,10 @@ void stopLoading(int success) {
     rdbFileBeingLoaded = NULL;
 
     /* Fire the loading modules end event. */
-    moduleFireServerEvent(REDISMODULE_EVENT_LOADING,
+    moduleFireServerEvent(VALKEYMODULE_EVENT_LOADING,
                           success?
-                            REDISMODULE_SUBEVENT_LOADING_ENDED:
-                            REDISMODULE_SUBEVENT_LOADING_FAILED,
+                            VALKEYMODULE_SUBEVENT_LOADING_ENDED:
+                            VALKEYMODULE_SUBEVENT_LOADING_FAILED,
                            NULL);
 }
 
@@ -2924,22 +2933,22 @@ void startSaving(int rdbflags) {
     /* Fire the persistence modules start event. */
     int subevent;
     if (rdbflags & RDBFLAGS_AOF_PREAMBLE && getpid() != server.pid)
-        subevent = REDISMODULE_SUBEVENT_PERSISTENCE_AOF_START;
+        subevent = VALKEYMODULE_SUBEVENT_PERSISTENCE_AOF_START;
     else if (rdbflags & RDBFLAGS_AOF_PREAMBLE)
-        subevent = REDISMODULE_SUBEVENT_PERSISTENCE_SYNC_AOF_START;
+        subevent = VALKEYMODULE_SUBEVENT_PERSISTENCE_SYNC_AOF_START;
     else if (getpid()!=server.pid)
-        subevent = REDISMODULE_SUBEVENT_PERSISTENCE_RDB_START;
+        subevent = VALKEYMODULE_SUBEVENT_PERSISTENCE_RDB_START;
     else
-        subevent = REDISMODULE_SUBEVENT_PERSISTENCE_SYNC_RDB_START;
-    moduleFireServerEvent(REDISMODULE_EVENT_PERSISTENCE,subevent,NULL);
+        subevent = VALKEYMODULE_SUBEVENT_PERSISTENCE_SYNC_RDB_START;
+    moduleFireServerEvent(VALKEYMODULE_EVENT_PERSISTENCE,subevent,NULL);
 }
 
 void stopSaving(int success) {
     /* Fire the persistence modules end event. */
-    moduleFireServerEvent(REDISMODULE_EVENT_PERSISTENCE,
+    moduleFireServerEvent(VALKEYMODULE_EVENT_PERSISTENCE,
                           success?
-                            REDISMODULE_SUBEVENT_PERSISTENCE_ENDED:
-                            REDISMODULE_SUBEVENT_PERSISTENCE_FAILED,
+                            VALKEYMODULE_SUBEVENT_PERSISTENCE_ENDED:
+                            VALKEYMODULE_SUBEVENT_PERSISTENCE_FAILED,
                           NULL);
 }
 
@@ -2981,7 +2990,7 @@ int rdbFunctionLoad(rio *rdb, int ver, functionsLibCtx* lib_ctx, int rdbflags, s
 
     if (lib_ctx) {
         sds library_name = NULL;
-        if (!(library_name = functionsCreateWithLibraryCtx(final_payload, rdbflags & RDBFLAGS_ALLOW_DUP, &error, lib_ctx))) {
+        if (!(library_name = functionsCreateWithLibraryCtx(final_payload, rdbflags & RDBFLAGS_ALLOW_DUP, &error, lib_ctx, 0))) {
             if (!error) {
                 error = sdsnew("Failed creating the library");
             }
@@ -3014,7 +3023,6 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
     return retval;
 }
 
-
 /* Load an RDB file from the rio stream 'rdb'. On success C_OK is returned,
  * otherwise C_ERR is returned.
  * The rdb_loading_ctx argument holds objects to which the rdb will be loaded to,
@@ -3023,7 +3031,9 @@ int rdbLoadRio(rio *rdb, int rdbflags, rdbSaveInfo *rsi) {
 int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadingCtx *rdb_loading_ctx) {
     uint64_t dbid = 0;
     int type, rdbver;
-    redisDb *db = rdb_loading_ctx->dbarray+0;
+    uint64_t db_size = 0, expires_size = 0;
+    int should_expand_db = 0;
+    serverDb *db = rdb_loading_ctx->dbarray+0;
     char buf[1024];
     int error;
     long long empty_keys_skipped = 0;
@@ -3098,13 +3108,27 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         } else if (type == RDB_OPCODE_RESIZEDB) {
             /* RESIZEDB: Hint about the size of the keys in the currently
              * selected data base, in order to avoid useless rehashing. */
-            uint64_t db_size, expires_size;
             if ((db_size = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
                 goto eoferr;
             if ((expires_size = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
                 goto eoferr;
-            dictExpand(db->dict,db_size);
-            dictExpand(db->expires,expires_size);
+            should_expand_db = 1;
+            continue; /* Read next opcode. */
+        } else if (type == RDB_OPCODE_SLOT_INFO) {
+            uint64_t slot_id, slot_size, expires_slot_size;
+            if ((slot_id = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
+                goto eoferr;
+            if ((slot_size = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
+                goto eoferr;
+            if ((expires_slot_size = rdbLoadLen(rdb,NULL)) == RDB_LENERR)
+                goto eoferr;
+            if (!server.cluster_enabled) {
+                continue; /* Ignore gracefully. */
+            }
+            /* In cluster mode we resize individual slot specific dictionaries based on the number of keys that slot holds. */
+            kvstoreDictExpand(db->keys, slot_id, slot_size);
+            kvstoreDictExpand(db->expires, slot_id, expires_slot_size);
+            should_expand_db = 0;
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_AUX) {
             /* AUX: generic string-string fields. Use to add state to RDB
@@ -3138,7 +3162,10 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             } else if (!strcasecmp(auxkey->ptr,"lua")) {
                 /* Won't load the script back in memory anymore. */
             } else if (!strcasecmp(auxkey->ptr,"redis-ver")) {
-                serverLog(LL_NOTICE,"Loading RDB produced by version %s",
+                serverLog(LL_NOTICE,"Loading RDB produced by Redis version %s",
+                    (char*)auxval->ptr);
+            } else if (!strcasecmp(auxkey->ptr,"valkey-ver")) {
+                serverLog(LL_NOTICE,"Loading RDB produced by valkey version %s",
                     (char*)auxval->ptr);
             } else if (!strcasecmp(auxkey->ptr,"ctime")) {
                 time_t age = time(NULL)-strtol(auxval->ptr,NULL,10);
@@ -3169,7 +3196,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             decrRefCount(auxval);
             continue; /* Read type again. */
         } else if (type == RDB_OPCODE_MODULE_AUX) {
-            /* Load module data that is not related to the Redis key space.
+            /* Load module data that is not related to the server key space.
              * Such data can be potentially be stored both before and after the
              * RDB keys-values section. */
             uint64_t moduleid = rdbLoadLen(rdb,NULL);
@@ -3195,7 +3222,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                     exit(1);
                 }
 
-                RedisModuleIO io;
+                ValkeyModuleIO io;
                 moduleInitIOContext(io,mt,rdb,NULL,-1);
                 /* Call the rdb_load method of the module providing the 10 bit
                  * encoding version in the lower 10 bits of the module ID. */
@@ -3204,7 +3231,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                     moduleFreeContext(io.ctx);
                     zfree(io.ctx);
                 }
-                if (rc != REDISMODULE_OK || io.error) {
+                if (rc != VALKEYMODULE_OK || io.error) {
                     moduleTypeNameByID(name,moduleid);
                     serverLog(LL_WARNING,"The RDB file contains module AUX data for the module type '%s', that the responsible module is not able to load. Check for modules log above for additional clues.", name);
                     goto eoferr;
@@ -3232,6 +3259,14 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                 goto eoferr;
             }
             continue;
+        }
+
+        /* If there is no slot info, it means that it's either not cluster mode or we are trying to load legacy RDB file.
+         * In this case we want to estimate number of keys per slot and resize accordingly. */
+        if (should_expand_db) {
+            dbExpand(db, db_size, 0);
+            dbExpandExpires(db, expires_size, 0);
+            should_expand_db = 0;
         }
 
         /* Read key */
@@ -3356,7 +3391,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
     return C_OK;
 
     /* Unexpected end of file is handled here calling rdbReportReadError():
-     * this will in turn either abort Redis in most cases, or if we are loading
+     * this will in turn either abort the server in most cases, or if we are loading
      * the RDB file from a socket during initial SYNC (diskless replica mode),
      * we'll report the error to the caller, so that we can retry. */
 eoferr:
@@ -3402,19 +3437,19 @@ int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags) {
     if (retval == C_OK && !(rdbflags & RDBFLAGS_KEEP_CACHE)) {
         /* TODO: maybe we could combine the fopen and open into one in the future */
         rdb_fd = open(filename, O_RDONLY);
-        if (rdb_fd > 0) bioCreateCloseJob(rdb_fd, 0, 1);
+        if (rdb_fd >= 0) bioCreateCloseJob(rdb_fd, 0, 1);
     }
     return (retval==C_OK) ? RDB_OK : RDB_FAILED;
 }
 
 /* A background saving child (BGSAVE) terminated its work. Handle this.
  * This function covers the case of actual BGSAVEs. */
-static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal) {
+static void backgroundSaveDoneHandlerDisk(int exitcode, int bysignal, time_t save_end) {
     if (!bysignal && exitcode == 0) {
         serverLog(LL_NOTICE,
             "Background saving terminated with success");
         server.dirty = server.dirty - server.dirty_before_bgsave;
-        server.lastsave = time(NULL);
+        server.lastsave = save_end;
         server.lastbgsave_status = C_OK;
     } else if (!bysignal && exitcode != 0) {
         serverLog(LL_WARNING, "Background saving error");
@@ -3466,9 +3501,11 @@ static void backgroundSaveDoneHandlerSocket(int exitcode, int bysignal) {
 /* When a background RDB saving/transfer terminates, call the right handler. */
 void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     int type = server.rdb_child_type;
+    time_t save_end = time(NULL);
+
     switch(server.rdb_child_type) {
     case RDB_CHILD_TYPE_DISK:
-        backgroundSaveDoneHandlerDisk(exitcode,bysignal);
+        backgroundSaveDoneHandlerDisk(exitcode,bysignal,save_end);
         break;
     case RDB_CHILD_TYPE_SOCKET:
         backgroundSaveDoneHandlerSocket(exitcode,bysignal);
@@ -3479,7 +3516,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     }
 
     server.rdb_child_type = RDB_CHILD_TYPE_NONE;
-    server.rdb_save_time_last = time(NULL)-server.rdb_save_time_start;
+    server.rdb_save_time_last = save_end-server.rdb_save_time_start;
     server.rdb_save_time_start = -1;
     /* Possibly there are slaves waiting for a BGSAVE in order to be served
      * (the first stage of SYNC is a bulk transfer of dump.rdb) */
@@ -3506,6 +3543,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
     listIter li;
     pid_t childpid;
     int pipefds[2], rdb_pipe_write, safe_to_exit_pipe;
+    int direct = (req & SLAVE_REQ_RDB_CHANNEL);
 
     if (hasActiveChildProcess()) return C_ERR;
 
@@ -3533,9 +3571,15 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
     /* Collect the connections of the replicas we want to transfer
      * the RDB to, which are i WAIT_BGSAVE_START state. */
-    server.rdb_pipe_conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
-    server.rdb_pipe_numconns = 0;
-    server.rdb_pipe_numconns_writing = 0;
+    int connsnum = 0;
+    connection **conns = zmalloc(sizeof(connection *)*listLength(server.slaves));
+    server.rdb_pipe_conns = NULL;
+    if (!direct) {
+        server.rdb_pipe_conns = conns;
+        server.rdb_pipe_numconns = 0;
+        server.rdb_pipe_numconns_writing = 0;
+    }
+    /* Filter replica connections pending full sync (ie. in WAIT_BGSAVE_START state). */
     listRewind(server.slaves,&li);
     while((ln = listNext(&li))) {
         client *slave = ln->value;
@@ -3543,25 +3587,40 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             /* Check slave has the exact requirements */
             if (slave->slave_req != req)
                 continue;
-            server.rdb_pipe_conns[server.rdb_pipe_numconns++] = slave->conn;
+            conns[connsnum++] = slave->conn;
+            if (direct) {
+                /* Put the socket in blocking mode to simplify RDB transfer. */
+                connBlock(slave->conn);
+                connSendTimeout(slave->conn, server.repl_timeout * 1000);
+                /* This replica uses diskless rdb channel sync, hence we need
+                 * to inform it with the save end offset.*/
+                sendCurrentOffsetToReplica(slave);
+                /* Make sure repl traffic is appended to the replication backlog */                
+                addSlaveToPsyncWaitingRax(slave);
+            } else {
+                server.rdb_pipe_numconns++;
+            }
             replicationSetupSlaveForFullResync(slave,getPsyncInitialOffset());
         }
     }
 
     /* Create the child process. */
-    if ((childpid = redisFork(CHILD_TYPE_RDB)) == 0) {
+    if ((childpid = serverFork(CHILD_TYPE_RDB)) == 0) {
         /* Child */
         int retval, dummy;
         rio rdb;
-
-        rioInitWithFd(&rdb,rdb_pipe_write);
+        if (direct) {
+            rioInitWithConnset(&rdb, conns, connsnum);
+        } else {
+            rioInitWithFd(&rdb,rdb_pipe_write);
+        }
 
         /* Close the reading part, so that if the parent crashes, the child will
          * get a write error and exit. */
         close(server.rdb_pipe_read);
 
-        redisSetProcTitle("redis-rdb-to-slaves");
-        redisSetCpuAffinity(server.bgsave_cpulist);
+        serverSetProcTitle("redis-rdb-to-slaves");
+        serverSetCpuAffinity(server.bgsave_cpulist);
 
         retval = rdbSaveRioWithEOFMark(req,&rdb,NULL,rsi);
         if (retval == C_OK && rioFlush(&rdb) == 0)
@@ -3570,8 +3629,12 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
-
-        rioFreeFd(&rdb);
+        if (direct) {
+            rioFreeConnset(&rdb);
+        } else {
+            rioFreeFd(&rdb);
+        }
+        zfree(conns);
         /* wake up the reader, tell it we're done. */
         close(rdb_pipe_write);
         close(server.rdb_child_exit_pipe); /* close write end so that we can detect the close on the parent. */
@@ -3598,19 +3661,24 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
             }
             close(rdb_pipe_write);
             close(server.rdb_pipe_read);
-            zfree(server.rdb_pipe_conns);
-            server.rdb_pipe_conns = NULL;
-            server.rdb_pipe_numconns = 0;
-            server.rdb_pipe_numconns_writing = 0;
+            zfree(conns);
+            if (direct) {
+                closeChildInfoPipe();
+            } else {
+                server.rdb_pipe_conns = NULL;
+                server.rdb_pipe_numconns = 0;
+                server.rdb_pipe_numconns_writing = 0;
+            }
         } else {
-            serverLog(LL_NOTICE,"Background RDB transfer started by pid %ld",
-                (long) childpid);
+            serverLog(LL_NOTICE,"Background RDB transfer started by pid %ld to %s",
+                (long) childpid, direct? "replica socket" : "pipe");
             server.rdb_save_time_start = time(NULL);
             server.rdb_child_type = RDB_CHILD_TYPE_SOCKET;
             close(rdb_pipe_write); /* close write in parent so that it can detect the close on the child. */
             if (aeCreateFileEvent(server.el, server.rdb_pipe_read, AE_READABLE, rdbPipeReadHandler,NULL) == AE_ERR) {
                 serverPanic("Unrecoverable error creating server.rdb_pipe_read file event.");
             }
+            if (direct) zfree(conns);
         }
         close(safe_to_exit_pipe);
         return (childpid == -1) ? C_ERR : C_OK;

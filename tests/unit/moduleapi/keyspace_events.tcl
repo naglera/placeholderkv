@@ -76,7 +76,7 @@ tags "modules" {
         test "Keyspace notifications: module events test" {
             r config set notify-keyspace-events Kd
             r del x
-            set rd1 [redis_deferring_client]
+            set rd1 [valkey_deferring_client]
             assert_equal {1} [psubscribe $rd1 *]
             r keyspace.notify x
             assert_equal {pmessage * __keyspace@9__:x notify} [$rd1 read]
@@ -100,6 +100,19 @@ tags "modules" {
 
         test "Verify RM_StringDMA with expiration are not causing invalid memory access" {
             assert_equal {OK} [r set x 1 EX 1]
+        }
+    }
+
+    start_server {} {
+        test {OnLoad failure will handle un-registration} {
+            catch {r module load $testmodule noload}
+            r set x 1
+            r hset y f v
+            r lpush z 1 2 3
+            r sadd p 1 2 3
+            r zadd t 1 f1 2 f2
+            r xadd s * f v
+            r ping
         }
     }
 }

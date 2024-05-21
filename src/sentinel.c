@@ -1,4 +1,4 @@
-/* Redis Sentinel implementation
+/* Sentinel implementation
  *
  * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
@@ -60,7 +60,7 @@ typedef struct sentinelAddr {
     int port;
 } sentinelAddr;
 
-/* A Sentinel Redis Instance object is monitoring. */
+/* A Sentinel Instance object is monitoring. */
 #define SRI_MASTER  (1<<0)
 #define SRI_SLAVE   (1<<1)
 #define SRI_SENTINEL (1<<2)
@@ -477,7 +477,7 @@ const char *preMonitorCfgName[] = {
     "announce-hostnames"
 };
 
-/* This function overwrites a few normal Redis config default with Sentinel
+/* This function overwrites a few normal server config default with Sentinel
  * specific defaults. */
 void initSentinelConfig(void) {
     server.port = REDIS_SENTINEL_PORT;
@@ -617,7 +617,7 @@ int sentinelAddrEqualsHostname(sentinelAddr *a, char *hostname) {
                     sentinel.resolve_hostnames ? ANET_NONE : ANET_IP_ONLY) == ANET_ERR) {
 
         /* If failed resolve then compare based on hostnames. That is our best effort as
-         * long as the server is unavailable for some reason. It is fine since Redis 
+         * long as the server is unavailable for some reason. It is fine since an
          * instance cannot have multiple hostnames for a given setup */
         return !strcasecmp(sentinel.resolve_hostnames ? a->hostname : a->ip, hostname);
     }
@@ -649,7 +649,7 @@ sds announceSentinelAddrAndPort(const sentinelAddr *a) {
  *
  * 'type' is the message type, also used as a pub/sub channel name.
  *
- * 'ri', is the redis instance target of this event if applicable, and is
+ * 'ri', is the server instance target of this event if applicable, and is
  * used to obtain the path of the notification script to execute.
  *
  * The remaining arguments are printf-alike.
@@ -1260,7 +1260,7 @@ void sentinelDisconnectCallback(const redisAsyncContext *c, int status) {
 
 /* ========================== sentinelRedisInstance ========================= */
 
-/* Create a redis instance, the following fields must be populated by the
+/* Create an instance of the server, the following fields must be populated by the
  * caller if needed:
  * runid: set to NULL but will be populated once INFO output is received.
  * info_refresh: is set to 0 to mean that we never received INFO so far.
@@ -1406,7 +1406,7 @@ void releaseSentinelRedisInstance(sentinelRedisInstance *ri) {
     zfree(ri);
 }
 
-/* Lookup a slave in a master Redis instance, by ip and port. */
+/* Lookup a slave in a master instance, by ip and port. */
 sentinelRedisInstance *sentinelRedisInstanceLookupSlave(
                 sentinelRedisInstance *ri, char *slave_addr, int port)
 {
@@ -1696,7 +1696,7 @@ void sentinelPropagateDownAfterPeriod(sentinelRedisInstance *master) {
     }
 }
 
-/* This function is used in order to send commands to Redis instances: the
+/* This function is used in order to send commands to server instances: the
  * commands we send from Sentinel may be renamed, a common case is a master
  * with CONFIG and SLAVEOF commands renamed for security concerns. In that
  * case we check the ri->renamed_command table (or if the instance is a slave,
@@ -1740,7 +1740,7 @@ const char *sentinelCheckCreateInstanceErrors(int role) {
 }
 
 /* init function for server.sentinel_config */
-void initializeSentinelConfig() {
+void initializeSentinelConfig(void) {
     server.sentinel_config = zmalloc(sizeof(struct sentinelConfig));
     server.sentinel_config->monitor_cfg = listCreate();
     server.sentinel_config->pre_monitor_cfg = listCreate();
@@ -1751,7 +1751,7 @@ void initializeSentinelConfig() {
 }
 
 /* destroy function for server.sentinel_config */
-void freeSentinelConfig() {
+void freeSentinelConfig(void) {
     /* release these three config queues since we will not use it anymore */
     listRelease(server.sentinel_config->pre_monitor_cfg);
     listRelease(server.sentinel_config->monitor_cfg);
@@ -1846,8 +1846,7 @@ void loadSentinelConfigFromQueue(void) {
     return;
 
 loaderr:
-    fprintf(stderr, "\n*** FATAL CONFIG FILE ERROR (Redis %s) ***\n",
-        REDIS_VERSION);
+    fprintf(stderr, "\n*** FATAL CONFIG FILE ERROR (Version %s) ***\n", VALKEY_VERSION);
     fprintf(stderr, "Reading the configuration file, at line %d\n", linenum);
     fprintf(stderr, ">>> '%s'\n", line);
     fprintf(stderr, "%s\n", err);
@@ -2275,10 +2274,10 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
     rewriteConfigMarkAsProcessed(state,"sentinel master-reboot-down-after-period");
 }
 
-/* This function uses the config rewriting Redis engine in order to persist
+/* This function uses the config rewriting in order to persist
  * the state of the Sentinel in the current configuration file.
  *
- * On failure the function logs a warning on the Redis log. */
+ * On failure the function logs a warning on the server log. */
 int sentinelFlushConfig(void) {
     int saved_hz = server.hz;
     int rewrite_status;
@@ -2357,12 +2356,12 @@ void sentinelSendAuthIfNeeded(sentinelRedisInstance *ri, redisAsyncContext *c) {
     }
 }
 
-/* Use CLIENT SETNAME to name the connection in the Redis instance as
+/* Use CLIENT SETNAME to name the connection in the instance as
  * sentinel-<first_8_chars_of_runid>-<connection_type>
  * The connection type is "cmd" or "pubsub" as specified by 'type'.
  *
  * This makes it possible to list all the sentinel instances connected
- * to a Redis server with CLIENT LIST, grepping for a specific name format. */
+ * to a server with CLIENT LIST, grepping for a specific name format. */
 void sentinelSetClientName(sentinelRedisInstance *ri, redisAsyncContext *c, char *type) {
     char name[64];
 
@@ -2492,7 +2491,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
         link->disconnected = 0;
 }
 
-/* ======================== Redis instances pinging  ======================== */
+/* ======================== Server instances pinging  ======================== */
 
 /* Return true if master looks "sane", that is:
  * 1) It is actually a master in the current configuration.
@@ -3003,7 +3002,7 @@ void sentinelReceiveHelloMessages(redisAsyncContext *c, void *reply, void *privd
     sentinelProcessHelloMessage(r->element[2]->str, r->element[2]->len);
 }
 
-/* Send a "Hello" message via Pub/Sub to the specified 'ri' Redis
+/* Send a "Hello" message via Pub/Sub to the specified 'ri' server
  * instance in order to broadcast the current configuration for this
  * master, and to advertise the existence of this Sentinel at the same time.
  *
@@ -3072,7 +3071,7 @@ void sentinelForceHelloUpdateDictOfRedisInstances(dict *instances) {
 }
 
 /* This function forces the delivery of a "Hello" message (see
- * sentinelSendHello() top comment for further information) to all the Redis
+ * sentinelSendHello() top comment for further information) to all the server
  * and Sentinel instances related to the specified 'master'.
  *
  * It is technically not needed since we send an update to every instance
@@ -3178,63 +3177,134 @@ void sentinelSendPeriodicCommands(sentinelRedisInstance *ri) {
 }
 
 /* =========================== SENTINEL command ============================= */
+static void populateDict(dict *options_dict, char **options) {
+    for (int i=0; options[i]; i++) {
+        sds option = sdsnew(options[i]);
+        if (dictAdd(options_dict, option, NULL)==DICT_ERR)
+            sdsfree(option);
+    }
+}
 
-const char* getLogLevel() {
+const char* getLogLevel(void) {
    switch (server.verbosity) {
     case LL_DEBUG: return "debug";
     case LL_VERBOSE: return "verbose";
     case LL_NOTICE: return "notice";
     case LL_WARNING: return "warning";
+    case LL_NOTHING: return "nothing";
     }
     return "unknown";
 }
 
-/* SENTINEL CONFIG SET <option> <value>*/
+/* SENTINEL CONFIG SET option value [option value ...] */
 void sentinelConfigSetCommand(client *c) {
-    robj *o = c->argv[3];
-    robj *val = c->argv[4];
     long long numval;
     int drop_conns = 0;
+    char *option;
+    robj *val;
+    char *options[] = {
+        "announce-ip",
+        "sentinel-user",
+        "sentinel-pass",
+        "resolve-hostnames",
+        "announce-port",
+        "announce-hostnames",
+        "loglevel",
+        NULL};
+    static dict *options_dict = NULL;
+    if (!options_dict) {
+        options_dict = dictCreate(&stringSetDictType);
+        populateDict(options_dict, options);
+    }
+    dict *set_configs = dictCreate(&stringSetDictType);
 
-    if (!strcasecmp(o->ptr, "resolve-hostnames")) {
-        if ((numval = yesnotoi(val->ptr)) == -1) goto badfmt;
-        sentinel.resolve_hostnames = numval;
-    } else if (!strcasecmp(o->ptr, "announce-hostnames")) {
-        if ((numval = yesnotoi(val->ptr)) == -1) goto badfmt;
-        sentinel.announce_hostnames = numval;
-    } else if (!strcasecmp(o->ptr, "announce-ip")) {
-        if (sentinel.announce_ip) sdsfree(sentinel.announce_ip);
-        sentinel.announce_ip = sdsnew(val->ptr);
-    } else if (!strcasecmp(o->ptr, "announce-port")) {
-        if (getLongLongFromObject(val, &numval) == C_ERR ||
-            numval < 0 || numval > 65535)
-            goto badfmt;
-        sentinel.announce_port = numval;
-    } else if (!strcasecmp(o->ptr, "sentinel-user")) {
-        sdsfree(sentinel.sentinel_auth_user);
-        sentinel.sentinel_auth_user = sdslen(val->ptr) == 0 ?
-            NULL : sdsdup(val->ptr);
-        drop_conns = 1;
-    } else if (!strcasecmp(o->ptr, "sentinel-pass")) {
-        sdsfree(sentinel.sentinel_auth_pass);
-        sentinel.sentinel_auth_pass = sdslen(val->ptr) == 0 ?
-            NULL : sdsdup(val->ptr);
-        drop_conns = 1;
-    } else if (!strcasecmp(o->ptr, "loglevel")) {
-        if (!strcasecmp(val->ptr, "debug"))
-            server.verbosity = LL_DEBUG;
-        else if (!strcasecmp(val->ptr, "verbose"))
-            server.verbosity = LL_VERBOSE;
-        else if (!strcasecmp(val->ptr, "notice"))
-            server.verbosity = LL_NOTICE;
-        else if (!strcasecmp(val->ptr, "warning"))
-            server.verbosity = LL_WARNING;
-        else
-            goto badfmt;
-    } else {
-        addReplyErrorFormat(c, "Invalid argument '%s' to SENTINEL CONFIG SET",
-                            (char *) o->ptr);
-        return;
+    /* Validate arguments are valid */
+    for (int i = 3; i < c->argc; i++) {
+        option = c->argv[i]->ptr;
+
+        /* Validate option is valid */
+        if (dictFind(options_dict, option) == NULL) {
+            addReplyErrorFormat(c, "Invalid argument '%s' to SENTINEL CONFIG SET", option);
+            goto exit;
+        }
+
+        /* Check duplicates */
+        if (dictFind(set_configs, option) != NULL) {
+            addReplyErrorFormat(c, "Duplicate argument '%s' to SENTINEL CONFIG SET", option);
+            goto exit;
+        }
+
+        serverAssert(dictAdd(set_configs, sdsnew(option), NULL) == C_OK);
+
+        /* Validate argument */
+        if (i + 1 == c->argc) {
+            addReplyErrorFormat(c, "Missing argument '%s' value", option);
+            goto exit;
+        }
+        val = c->argv[++i];
+
+        if (!strcasecmp(option, "resolve-hostnames")) {
+            if ((yesnotoi(val->ptr)) == -1) goto badfmt;
+        } else if (!strcasecmp(option, "announce-hostnames")) {
+            if ((yesnotoi(val->ptr)) == -1) goto badfmt;
+        } else if (!strcasecmp(option, "announce-port")) {
+            if (getLongLongFromObject(val, &numval) == C_ERR ||
+                numval < 0 || numval > 65535) goto badfmt;
+        } else if (!strcasecmp(option, "loglevel")) {
+            if (!(!strcasecmp(val->ptr, "debug") || !strcasecmp(val->ptr, "verbose") ||
+                !strcasecmp(val->ptr, "notice") || !strcasecmp(val->ptr, "warning") ||
+                !strcasecmp(val->ptr, "nothing"))) goto badfmt;
+        }
+    }
+
+    /* Apply changes */
+    for (int i = 3; i < c->argc; i++) {
+        int moreargs = (c->argc-1) - i;
+        option = c->argv[i]->ptr;
+        if (!strcasecmp(option, "loglevel") && moreargs > 0) {
+            val = c->argv[++i];
+            if (!strcasecmp(val->ptr, "debug"))
+                server.verbosity = LL_DEBUG;
+            else if (!strcasecmp(val->ptr, "verbose"))
+                server.verbosity = LL_VERBOSE;
+            else if (!strcasecmp(val->ptr, "notice"))
+                server.verbosity = LL_NOTICE;
+            else if (!strcasecmp(val->ptr, "warning"))
+                server.verbosity = LL_WARNING;
+            else if (!strcasecmp(val->ptr, "nothing"))
+                server.verbosity = LL_NOTHING;
+        } else if (!strcasecmp(option, "resolve-hostnames") && moreargs > 0) {
+            val = c->argv[++i];
+            numval = yesnotoi(val->ptr);
+            sentinel.resolve_hostnames = numval;
+        } else if (!strcasecmp(option, "announce-hostnames") && moreargs > 0) {
+            val = c->argv[++i];
+            numval = yesnotoi(val->ptr);
+            sentinel.announce_hostnames = numval;
+        } else if (!strcasecmp(option, "announce-ip") && moreargs > 0) {
+            val = c->argv[++i];
+            if (sentinel.announce_ip) sdsfree(sentinel.announce_ip);
+            sentinel.announce_ip = sdsnew(val->ptr);
+        } else if (!strcasecmp(option, "announce-port") && moreargs > 0) {
+            val = c->argv[++i];
+            getLongLongFromObject(val, &numval);
+            sentinel.announce_port = numval;
+        } else if (!strcasecmp(option, "sentinel-user") && moreargs > 0) {
+            val = c->argv[++i];
+            sdsfree(sentinel.sentinel_auth_user);
+            sentinel.sentinel_auth_user = sdslen(val->ptr) == 0 ?
+                NULL : sdsdup(val->ptr);
+            drop_conns = 1;
+        } else if (!strcasecmp(option, "sentinel-pass") && moreargs > 0) {
+            val = c->argv[++i];
+            sdsfree(sentinel.sentinel_auth_pass);
+            sentinel.sentinel_auth_pass = sdslen(val->ptr) == 0 ?
+                NULL : sdsdup(val->ptr);
+            drop_conns = 1;
+        } else {
+            /* Should never reach here */
+            serverAssert(0);
+        }
     }
 
     sentinelFlushConfigAndReply(c);
@@ -3243,61 +3313,72 @@ void sentinelConfigSetCommand(client *c) {
     if (drop_conns)
         sentinelDropConnections();
 
+exit:
+    dictRelease(set_configs);
     return;
 
 badfmt:
     addReplyErrorFormat(c, "Invalid value '%s' to SENTINEL CONFIG SET '%s'",
-                        (char *) val->ptr, (char *) o->ptr);
+                        (char *) val->ptr, option);
+    dictRelease(set_configs);
 }
 
-/* SENTINEL CONFIG GET <option> */
+/* SENTINEL CONFIG GET <option> [<option> ...] */
 void sentinelConfigGetCommand(client *c) {
-    robj *o = c->argv[3];
-    const char *pattern = o->ptr;
+    char *pattern;
     void *replylen = addReplyDeferredLen(c);
     int matches = 0;
-
-    if (stringmatch(pattern,"resolve-hostnames",1)) {
-        addReplyBulkCString(c,"resolve-hostnames");
-        addReplyBulkCString(c,sentinel.resolve_hostnames ? "yes" : "no");
-        matches++;
+    /* Create a dictionary to store the input configs,to avoid adding duplicate twice */
+    dict *d = dictCreate(&externalStringType);
+    for (int i = 3; i < c->argc; i++) {
+        pattern = c->argv[i]->ptr;
+        /* If the string doesn't contain glob patterns and available in dictionary, don't look further, just continue. */
+        if (!strpbrk(pattern, "[*?") && dictFind(d, pattern)) continue;
+        /* we want to print all the matched patterns and avoid printing duplicates twice */
+        if (stringmatch(pattern,"resolve-hostnames",1) && !dictFind(d, "resolve-hostnames")) {
+            addReplyBulkCString(c,"resolve-hostnames");
+            addReplyBulkCString(c,sentinel.resolve_hostnames ? "yes" : "no");
+            dictAdd(d, "resolve-hostnames", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "announce-hostnames", 1) && !dictFind(d, "announce-hostnames")) {
+            addReplyBulkCString(c,"announce-hostnames");
+            addReplyBulkCString(c,sentinel.announce_hostnames ? "yes" : "no");
+            dictAdd(d, "announce-hostnames", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "announce-ip", 1) && !dictFind(d, "announce-ip")) {
+            addReplyBulkCString(c,"announce-ip");
+            addReplyBulkCString(c,sentinel.announce_ip ? sentinel.announce_ip : "");
+            dictAdd(d, "announce-ip", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "announce-port", 1) && !dictFind(d, "announce-port")) {
+            addReplyBulkCString(c, "announce-port");
+            addReplyBulkLongLong(c, sentinel.announce_port);
+            dictAdd(d, "announce-port", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "sentinel-user", 1) && !dictFind(d, "sentinel-user")) {
+            addReplyBulkCString(c, "sentinel-user");
+            addReplyBulkCString(c, sentinel.sentinel_auth_user ? sentinel.sentinel_auth_user : "");
+            dictAdd(d, "sentinel-user", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "sentinel-pass", 1) && !dictFind(d, "sentinel-pass")) {
+            addReplyBulkCString(c, "sentinel-pass");
+            addReplyBulkCString(c, sentinel.sentinel_auth_pass ? sentinel.sentinel_auth_pass : "");
+            dictAdd(d, "sentinel-pass", NULL);
+            matches++;
+        }
+        if (stringmatch(pattern, "loglevel", 1) && !dictFind(d, "loglevel")) {
+            addReplyBulkCString(c, "loglevel");
+            addReplyBulkCString(c, getLogLevel());
+            dictAdd(d, "loglevel", NULL);
+            matches++;
+        }
     }
-
-    if (stringmatch(pattern, "announce-hostnames", 1)) {
-        addReplyBulkCString(c,"announce-hostnames");
-        addReplyBulkCString(c,sentinel.announce_hostnames ? "yes" : "no");
-        matches++;
-    }
-
-    if (stringmatch(pattern, "announce-ip", 1)) {
-        addReplyBulkCString(c,"announce-ip");
-        addReplyBulkCString(c,sentinel.announce_ip ? sentinel.announce_ip : "");
-        matches++;
-    }
-
-    if (stringmatch(pattern, "announce-port", 1)) {
-        addReplyBulkCString(c, "announce-port");
-        addReplyBulkLongLong(c, sentinel.announce_port);
-        matches++;
-    }
-
-    if (stringmatch(pattern, "sentinel-user", 1)) {
-        addReplyBulkCString(c, "sentinel-user");
-        addReplyBulkCString(c, sentinel.sentinel_auth_user ? sentinel.sentinel_auth_user : "");
-        matches++;
-    }
-
-    if (stringmatch(pattern, "sentinel-pass", 1)) {
-        addReplyBulkCString(c, "sentinel-pass");
-        addReplyBulkCString(c, sentinel.sentinel_auth_pass ? sentinel.sentinel_auth_pass : "");
-        matches++;
-    }
-
-    if (stringmatch(pattern, "loglevel", 1)) {
-        addReplyBulkCString(c, "loglevel");
-        addReplyBulkCString(c, getLogLevel());
-        matches++;
-    }
+    dictRelease(d);
     setDeferredMapLen(c, replylen, matches);
 }
 
@@ -3314,7 +3395,7 @@ const char *sentinelFailoverStateStr(int state) {
     }
 }
 
-/* Redis instance to Redis protocol representation. */
+/* Server instance to RESP representation. */
 void addReplySentinelRedisInstance(client *c, sentinelRedisInstance *ri) {
     char *flags = sdsempty();
     void *mbl;
@@ -3719,7 +3800,7 @@ void addReplySentinelDebugInfo(client *c) {
 }
 
 /* Output a number of instances contained inside a dictionary as
- * Redis protocol. */
+ * RESP. */
 void addReplyDictOfRedisInstances(client *c, dict *instances) {
     dictIterator *di;
     dictEntry *de;
@@ -3787,9 +3868,9 @@ void sentinelCommand(client *c) {
 "    Check if the current Sentinel configuration is able to reach the quorum",
 "    needed to failover a master and the majority needed to authorize the",
 "    failover.",
-"CONFIG SET <param> <value>",
+"CONFIG SET param value [param value ...]",
 "    Set a global Sentinel configuration parameter.",
-"CONFIG GET <param>",
+"CONFIG GET <param> [param param param ...]",
 "    Get global Sentinel configuration parameter.",
 "DEBUG [<param> <value> ...]",
 "    Show a list of configurable time parameters and their values (milliseconds).",
@@ -4042,12 +4123,12 @@ NULL
         sentinelSetCommand(c);
     } else if (!strcasecmp(c->argv[1]->ptr,"config")) {
         if (c->argc < 4) goto numargserr;
-        if (!strcasecmp(c->argv[2]->ptr,"set") && c->argc == 5)
+        if (!strcasecmp(c->argv[2]->ptr,"set") && c->argc >= 5)
             sentinelConfigSetCommand(c);
-        else if (!strcasecmp(c->argv[2]->ptr,"get") && c->argc == 4)
+        else if (!strcasecmp(c->argv[2]->ptr,"get") && c->argc >= 4)
             sentinelConfigGetCommand(c);
         else
-            addReplyError(c, "Only SENTINEL CONFIG GET <option> / SET <option> <value> are supported.");
+            addReplyError(c, "Only SENTINEL CONFIG GET <param> [<param> <param> ...] / SET <param> <value> [<param> <value> ...] are supported.");
     } else if (!strcasecmp(c->argv[1]->ptr,"info-cache")) {
         /* SENTINEL INFO-CACHE <name> */
         if (c->argc < 2) goto numargserr;
@@ -4787,7 +4868,7 @@ char *sentinelGetLeader(sentinelRedisInstance *master, uint64_t epoch) {
 
 /* Send SLAVEOF to the specified instance, always followed by a
  * CONFIG REWRITE command in order to store the new configuration on disk
- * when possible (that is, if the Redis instance is recent enough to support
+ * when possible (that is, if the instance is recent enough to support
  * config rewriting, and if the server was started with a configuration file).
  *
  * If Host is NULL the function sends "SLAVEOF NO ONE".
@@ -4839,9 +4920,9 @@ int sentinelSendSlaveOf(sentinelRedisInstance *ri, const sentinelAddr *addr) {
     if (retval == C_ERR) return retval;
     ri->link->pending_commands++;
 
-    /* CLIENT KILL TYPE <type> is only supported starting from Redis 2.8.12,
+    /* CLIENT KILL TYPE <type> is only supported starting from Redis OSS 2.8.12,
      * however sending it to an instance not understanding this command is not
-     * an issue because CLIENT is variadic command, so Redis will not
+     * an issue because CLIENT is variadic command, so the server will not
      * recognized as a syntax error, and the transaction will not fail (but
      * only the unsupported command will fail). */
     for (int type = 0; type < 2; type++) {
@@ -4967,7 +5048,7 @@ int compareSlavesForPromotion(const void *a, const void *b) {
 
     /* If the replication offset is the same select the slave with that has
      * the lexicographically smaller runid. Note that we try to handle runid
-     * == NULL as there are old Redis versions that don't publish runid in
+     * == NULL as there are old Redis OSS versions that don't publish runid in
      * INFO. A NULL runid is considered bigger than any other runid. */
     sa_runid = (*sa)->runid;
     sb_runid = (*sb)->runid;
@@ -5293,7 +5374,7 @@ void sentinelAbortFailover(sentinelRedisInstance *ri) {
  * in design.
  * -------------------------------------------------------------------------- */
 
-/* Perform scheduled operations for the specified Redis instance. */
+/* Perform scheduled operations for the specified instance. */
 void sentinelHandleRedisInstance(sentinelRedisInstance *ri) {
     /* ========== MONITORING HALF ============ */
     /* Every kind of instance */
@@ -5392,7 +5473,7 @@ void sentinelTimer(void) {
     sentinelCollectTerminatedScripts();
     sentinelKillTimedoutScripts();
 
-    /* We continuously change the frequency of the Redis "timer interrupt"
+    /* We continuously change the frequency of the server "timer interrupt"
      * in order to desynchronize every Sentinel from every other.
      * This non-determinism avoids that Sentinels started at the same time
      * exactly continue to stay synchronized asking to be voted at the

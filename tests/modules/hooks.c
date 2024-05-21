@@ -33,6 +33,7 @@
 #include "redismodule.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 
 /* We need to store events to be able to test and see what we got, and we can't
@@ -399,16 +400,13 @@ static int cmdKeyExpiry(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     return REDISMODULE_OK;
 }
 
-/* This function must be present on each Redis module. It is used in order to
- * register the commands into the Redis server. */
+/* This function must be present on each module. It is used in order to
+ * register the commands into the server. */
 int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 #define VerifySubEventSupported(e, s) \
     if (!RedisModule_IsSubEventSupported(e, s)) { \
         return REDISMODULE_ERR; \
     }
-
-    REDISMODULE_NOT_USED(argv);
-    REDISMODULE_NOT_USED(argc);
 
     if (RedisModule_Init(ctx,"testhook",1,REDISMODULE_APIVER_1)
         == REDISMODULE_ERR) return REDISMODULE_ERR;
@@ -424,7 +422,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     RedisModule_SubscribeToServerEvent(ctx,
         RedisModuleEvent_ReplicaChange, replicationChangeCallback);
     RedisModule_SubscribeToServerEvent(ctx,
-        RedisModuleEvent_MasterLinkChange, rasterLinkChangeCallback);
+        RedisModuleEvent_PrimaryLinkChange, rasterLinkChangeCallback);
 
     /* persistence related hooks */
     RedisModule_SubscribeToServerEvent(ctx,
@@ -470,6 +468,18 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
     if (RedisModule_CreateCommand(ctx,"hooks.pexpireat", cmdKeyExpiry,"",0,0,0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
+
+    if (argc == 1) {
+        const char *ptr = RedisModule_StringPtrLen(argv[0], NULL);
+        if (!strcasecmp(ptr, "noload")) {
+            /* This is a hint that we return ERR at the last moment of OnLoad. */
+            RedisModule_FreeDict(ctx, event_log);
+            RedisModule_FreeDict(ctx, removed_event_log);
+            RedisModule_FreeDict(ctx, removed_subevent_type);
+            RedisModule_FreeDict(ctx, removed_expiry_log);
+            return REDISMODULE_ERR;
+        }
+    }
 
     return REDISMODULE_OK;
 }

@@ -5,7 +5,7 @@
  * using the 'slowlog-log-slower-than' config directive, that is also
  * readable and writable using the CONFIG SET/GET command.
  *
- * The slow queries log is actually not "logged" in the Redis log file
+ * The slow queries log is actually not "logged" in the server log file
  * but is accessible thanks to the SLOWLOG command.
  *
  * ----------------------------------------------------------------------------
@@ -78,7 +78,7 @@ slowlogEntry *slowlogCreateEntry(client *c, robj **argv, int argc, long long dur
                 /* Here we need to duplicate the string objects composing the
                  * argument vector of the command, because those may otherwise
                  * end shared with string objects stored into keys. Having
-                 * shared objects between any part of Redis, and the data
+                 * shared objects between any part of the server, and the data
                  * structure holding the data, is a problem: FLUSHALL ASYNC
                  * may release the shared string object and create a race. */
                 se->argv[j] = dupStringObject(argv[j]);
@@ -121,7 +121,7 @@ void slowlogInit(void) {
  * This function will make sure to trim the slow log accordingly to the
  * configured max length. */
 void slowlogPushEntryIfNeeded(client *c, robj **argv, int argc, long long duration) {
-    if (server.slowlog_log_slower_than < 0) return; /* Slowlog disabled */
+    if (server.slowlog_log_slower_than < 0 || server.slowlog_max_len == 0) return; /* Slowlog disabled */
     if (duration >= server.slowlog_log_slower_than)
         listAddNodeHead(server.slowlog,
                         slowlogCreateEntry(c,argv,argc,duration));
@@ -138,7 +138,7 @@ void slowlogReset(void) {
 }
 
 /* The SLOWLOG command. Implements all the subcommands needed to handle the
- * Redis slow log. */
+ * slow log. */
 void slowlogCommand(client *c) {
     if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"help")) {
         const char *help[] = {

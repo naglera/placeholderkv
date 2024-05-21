@@ -21,8 +21,7 @@ start_server {overrides {save {900 1}} tags {"modules"}} {
     }
 
     test {test redis version} {
-        set version [s redis_version]
-        assert_equal $version [r test.redisversion]
+        assert_equal [s valkey_version] [r test.serverversion]
     }
 
     test {test long double conversions} {
@@ -147,6 +146,19 @@ start_server {overrides {save {900 1}} tags {"modules"}} {
         assert_equal "PONG" [$rd_trk ping]
         $rd_trk close
     }
+
+    test {publish to self inside rm_call} {
+        r hello 3
+        r subscribe foo
+
+        # published message comes after the response of the command that issued it.
+        assert_equal [r test.rm_call publish foo bar] {1}
+        assert_equal [r read] {message foo bar}
+
+        r unsubscribe foo
+        r hello 2
+        set _ ""
+    } {} {resp3}
 
     test {test module get/set client name by id api} {
         catch { r test.getname } e
@@ -453,7 +465,7 @@ start_server {overrides {save {900 1}} tags {"modules"}} {
         # rm_call in script mode
         assert_error {MISCONF *} {r test.rm_call_flags S set x 1}
 
-        # repeate with script
+        # repeat with script
         assert_error {MISCONF *} {r test.rm_call eval {
             return redis.call('set','x',1)
             } 1 x
@@ -480,6 +492,14 @@ start_server {overrides {save {900 1}} tags {"modules"}} {
         # server is writable again
         r set x y
     } {OK}
+
+    test "malloc API" {
+        assert_equal {OK} [r test.malloc_api 0]
+    }
+
+    test "Cluster keyslot" {
+        assert_equal 12182 [r test.keyslot foo]
+    }
 }
 
 start_server {tags {"modules"}} {
@@ -529,7 +549,7 @@ if {[string match {*jemalloc*} [s mem_allocator]]} {
     test {test RM_Call with large arg for SET command} {
         # set a big value to trigger increasing the query buf
         r set foo [string repeat A 100000]
-        # set a smaller value but > PROTO_MBULK_BIG_ARG (32*1024) Redis will try to save the query buf itself on the DB.
+        # set a smaller value but > PROTO_MBULK_BIG_ARG (32*1024) the server will try to save the query buf itself on the DB.
         r test.call_generic set bar [string repeat A 33000]
         # asset the value was trimmed
         assert {[r memory usage bar] < 42000}; # 42K to count for Jemalloc's additional memory overhead.

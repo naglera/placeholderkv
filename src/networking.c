@@ -32,6 +32,7 @@
 #include "cluster.h"
 #include "script.h"
 #include "fpconv_dtoa.h"
+#include "fmtargs.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -83,10 +84,6 @@ void *dupClientReplyValue(void *o) {
 
 void freeClientReplyValue(void *o) {
     zfree(o);
-}
-
-int listMatchObjects(void *a, void *b) {
-    return equalStringObjects(a,b);
 }
 
 /* This function links the client to the global linked list of clients.
@@ -187,6 +184,8 @@ client *createClient(connection *conn) {
     c->slave_addr = NULL;
     c->slave_capa = SLAVE_CAPA_NONE;
     c->slave_req = SLAVE_REQ_NONE;
+    c->associated_rdb_client_id = 0;
+    c->rdb_client_disconnect_time = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
     c->reply_bytes = 0;
@@ -197,7 +196,7 @@ client *createClient(connection *conn) {
     c->woff = 0;
     c->watched_keys = listCreate();
     c->pubsub_channels = dictCreate(&objectKeyPointerValueDictType);
-    c->pubsub_patterns = listCreate();
+    c->pubsub_patterns = dictCreate(&objectKeyPointerValueDictType);
     c->pubsubshard_channels = dictCreate(&objectKeyPointerValueDictType);
     c->peerid = NULL;
     c->sockname = NULL;
@@ -214,8 +213,6 @@ client *createClient(connection *conn) {
     c->auth_callback_privdata = NULL;
     c->auth_module = NULL;
     listInitNode(&c->clients_pending_write_node, c);
-    listSetFreeMethod(c->pubsub_patterns,decrRefCountVoid);
-    listSetMatchMethod(c->pubsub_patterns,listMatchObjects);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
     if (conn) linkClient(c);
@@ -240,6 +237,11 @@ void installClientWriteHandler(client *c) {
     }
 }
 
+/* Determining whether a replica requires online data updates based on its state */
+int isReplDataRequired(client *c) {
+    return c->replstate == SLAVE_STATE_ONLINE || c->replstate == SLAVE_STATE_BG_RDB_LOAD;
+}
+
 /* This function puts the client in the queue of clients that should write
  * their output buffers to the socket. Note that it does not *yet* install
  * the write handler, to start clients are put in a queue of clients that need
@@ -253,7 +255,7 @@ void putClientInPendingWriteQueue(client *c) {
      * writes at this stage. */
     if (!(c->flags & CLIENT_PENDING_WRITE) &&
         (c->replstate == REPL_STATE_NONE ||
-         (c->replstate == SLAVE_STATE_ONLINE && !c->repl_start_cmd_stream_on_ack)))
+         (isReplDataRequired(c) && !c->repl_start_cmd_stream_on_ack)))
     {
         /* Here instead of installing the write handler, we just flag the
          * client and put it into a list of clients that have something
@@ -351,8 +353,8 @@ size_t _addReplyToBuffer(client *c, const char *s, size_t len) {
 
 /* Adds the reply to the reply linked list.
  * Note: some edits to this function need to be relayed to AddReplyFromClient. */
-void _addReplyProtoToList(client *c, const char *s, size_t len) {
-    listNode *ln = listLast(c->reply);
+void _addReplyProtoToList(client *c, list *reply_list, const char *s, size_t len) {
+    listNode *ln = listLast(reply_list);
     clientReplyBlock *tail = ln? listNodeValue(ln): NULL;
 
     /* Note that 'tail' may be NULL even if we have a tail node, because when
@@ -380,11 +382,21 @@ void _addReplyProtoToList(client *c, const char *s, size_t len) {
         tail->size = usable_size - sizeof(clientReplyBlock);
         tail->used = len;
         memcpy(tail->buf, s, len);
-        listAddNodeTail(c->reply, tail);
+        listAddNodeTail(reply_list, tail);
         c->reply_bytes += tail->size;
 
         closeClientOnOutputBufferLimitReached(c, 1);
     }
+}
+
+/* The subscribe / unsubscribe command family has a push as a reply,
+ * or in other words, it responds with a push (or several of them
+ * depending on how many arguments it got), and has no reply. */
+int cmdHasPushAsReply(struct serverCommand *cmd) {
+    if (!cmd) return 0;
+    return cmd->proc == subscribeCommand  || cmd->proc == unsubscribeCommand ||
+           cmd->proc == psubscribeCommand || cmd->proc == punsubscribeCommand ||
+           cmd->proc == ssubscribeCommand || cmd->proc == sunsubscribeCommand;
 }
 
 void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
@@ -405,8 +417,21 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
      * buffer offset (see function comment) */
     reqresSaveClientReplyOffset(c);
 
+    /* If we're processing a push message into the current client (i.e. executing PUBLISH
+     * to a channel which we are subscribed to, then we wanna postpone that message to be added
+     * after the command's reply (specifically important during multi-exec). the exception is
+     * the SUBSCRIBE command family, which (currently) have a push message instead of a proper reply.
+     * The check for executing_client also avoids affecting push messages that are part of eviction.
+     * Check CLIENT_PUSHING first to avoid race conditions, as it's absent in module's fake client. */
+    if ((c->flags & CLIENT_PUSHING) && c == server.current_client &&
+        server.executing_client && !cmdHasPushAsReply(server.executing_client->cmd))
+    {
+        _addReplyProtoToList(c,server.pending_push_messages,s,len);
+        return;
+    }
+
     size_t reply_len = _addReplyToBuffer(c,s,len);
-    if (len > reply_len) _addReplyProtoToList(c,s+reply_len,len-reply_len);
+    if (len > reply_len) _addReplyProtoToList(c,c->reply,s+reply_len,len-reply_len);
 }
 
 /* -----------------------------------------------------------------------------
@@ -448,7 +473,7 @@ void addReplySds(client *c, sds s) {
  * client buffer, trying the static buffer initially, and using the string
  * of objects if not possible.
  *
- * It is efficient because does not create an SDS object nor an Redis object
+ * It is efficient because does not create an SDS object nor an Object
  * if not needed. The object will only be created by calling
  * _addReplyProtoToList() if we fail to extend the existing tail object
  * in the list of objects. */
@@ -458,7 +483,7 @@ void addReplyProto(client *c, const char *s, size_t len) {
 }
 
 /* Low level function called by the addReplyError...() functions.
- * It emits the protocol for a Redis error, in the form:
+ * It emits the protocol for an error reply, in the form:
  *
  * -ERRORCODE Error Message<CR><LF>
  *
@@ -525,7 +550,7 @@ void afterErrorReply(client *c, const char *s, size_t len, int flags) {
      *
      * Where the master must propagate the first change even if the second
      * will produce an error. However it is useful to log such events since
-     * they are rare and may hint at errors in a script or a bug in Redis. */
+     * they are rare and may hint at errors in a script or a bug in the server. */
     int ctype = getClientType(c);
     if (ctype == CLIENT_TYPE_MASTER || ctype == CLIENT_TYPE_SLAVE || c->id == CLIENT_ID_AOF) {
         char *to, *from;
@@ -1024,7 +1049,7 @@ void addReplyBulkLen(client *c, robj *obj) {
     addReplyLongLongWithPrefix(c,len,'$');
 }
 
-/* Add a Redis Object as a bulk reply */
+/* Add an Object as a bulk reply */
 void addReplyBulk(client *c, robj *obj) {
     addReplyBulkLen(c,obj);
     addReply(c,obj);
@@ -1100,14 +1125,18 @@ void addReplyVerbatim(client *c, const char *s, size_t len, const char *ext) {
     }
 }
 
-/* Add an array of C strings as status replies with a heading.
- * This function is typically invoked by from commands that support
- * subcommands in response to the 'help' subcommand. The help array
- * is terminated by NULL sentinel. */
-void addReplyHelp(client *c, const char **help) {
+/* This function is similar to the addReplyHelp function but adds the
+ * ability to pass in two arrays of strings. Some commands have
+ * some additional subcommands based on the specific feature implementation
+ * the server is compiled with (currently just clustering). This function allows
+ * to pass is the common subcommands in `help` and any implementation
+ * specific subcommands in `extended_help`.
+ */
+void addExtendedReplyHelp(client *c, const char **help, const char **extended_help) {
     sds cmd = sdsnew((char*) c->argv[0]->ptr);
     void *blenp = addReplyDeferredLen(c);
     int blen = 0;
+    int idx = 0;
 
     sdstoupper(cmd);
     addReplyStatusFormat(c,
@@ -1115,6 +1144,10 @@ void addReplyHelp(client *c, const char **help) {
     sdsfree(cmd);
 
     while (help[blen]) addReplyStatus(c,help[blen++]);
+    if (extended_help) {
+        while (extended_help[idx]) addReplyStatus(c,extended_help[idx++]);
+    }
+    blen += idx;
 
     addReplyStatus(c,"HELP");
     addReplyStatus(c,"    Print this help.");
@@ -1122,6 +1155,14 @@ void addReplyHelp(client *c, const char **help) {
     blen += 1;  /* Account for the header. */
     blen += 2;  /* Account for the footer. */
     setDeferredArrayLen(c,blenp,blen);
+}
+
+/* Add an array of C strings as status replies with a heading.
+ * This function is typically invoked by commands that support
+ * subcommands in response to the 'help' subcommand. The help array
+ * is terminated by NULL sentinel. */
+void addReplyHelp(client *c, const char **help) {
+    addExtendedReplyHelp(c, help, NULL);
 }
 
 /* Add a suggestive error reply.
@@ -1275,8 +1316,8 @@ void clientAcceptHandler(connection *conn) {
     }
 
     server.stat_numconnections++;
-    moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
-                          REDISMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED,
+    moduleFireServerEvent(VALKEYMODULE_EVENT_CLIENT_CHANGE,
+                          VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED,
                           c);
 }
 
@@ -1417,7 +1458,7 @@ void unlinkClient(client *c) {
     listNode *ln;
 
     /* If this is marked as current client unset it. */
-    if (server.current_client == c) server.current_client = NULL;
+    if (c->conn && server.current_client == c) server.current_client = NULL;
 
     /* Certain operations must be done only if the client has an active connection.
      * If the client was already unlinked or if it's a "fake client" the
@@ -1461,7 +1502,7 @@ void unlinkClient(client *c) {
     }
 
     /* Remove from the list of pending reads if needed. */
-    serverAssert(io_threads_op == IO_THREADS_OP_IDLE);
+    serverAssert(!c->conn || io_threads_op == IO_THREADS_OP_IDLE);
     if (c->pending_read_list_node != NULL) {
         listDelNode(server.clients_pending_read,c->pending_read_list_node);
         c->pending_read_list_node = NULL;
@@ -1513,6 +1554,7 @@ void clearClientConnectionState(client *c) {
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);
     pubsubUnsubscribeAllPatterns(c,0);
+    unmarkClientAsPubSub(c);
 
     if (c->name) {
         decrRefCount(c->name);
@@ -1523,7 +1565,7 @@ void clearClientConnectionState(client *c) {
      * represent the client library behind the connection. */
     
     /* Selectively clear state flags not covered above */
-    c->flags &= ~(CLIENT_ASKING|CLIENT_READONLY|CLIENT_PUBSUB|CLIENT_REPLY_OFF|
+    c->flags &= ~(CLIENT_ASKING|CLIENT_READONLY|CLIENT_REPLY_OFF|
                   CLIENT_REPLY_SKIP_NEXT|CLIENT_NO_TOUCH|CLIENT_NO_EVICT);
 }
 
@@ -1532,15 +1574,15 @@ void freeClient(client *c) {
 
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
-    if (c->flags & CLIENT_PROTECTED) {
+    if ((c->flags & CLIENT_PROTECTED) || (c->flags & CLIENT_PROTECTED_RDB_CHANNEL)) {
         freeClientAsync(c);
         return;
     }
 
     /* For connected clients, call the disconnection event of modules hooks. */
     if (c->conn) {
-        moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
-                              REDISMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED,
+        moduleFireServerEvent(VALKEYMODULE_EVENT_CLIENT_CHANGE,
+                              VALKEYMODULE_SUBEVENT_CLIENT_CHANGE_DISCONNECTED,
                               c);
     }
 
@@ -1598,8 +1640,9 @@ void freeClient(client *c) {
     pubsubUnsubscribeAllChannels(c,0);
     pubsubUnsubscribeShardAllChannels(c, 0);
     pubsubUnsubscribeAllPatterns(c,0);
+    unmarkClientAsPubSub(c);
     dictRelease(c->pubsub_channels);
-    listRelease(c->pubsub_patterns);
+    dictRelease(c->pubsub_patterns);
     dictRelease(c->pubsubshard_channels);
 
     /* Free data structures. */
@@ -1613,6 +1656,12 @@ void freeClient(client *c) {
 #ifdef LOG_REQ_RES
     reqresReset(c, 1);
 #endif
+
+    /* Remove the contribution that this client gave to our
+     * incrementally computed memory usage. */
+    if (c->conn)
+        server.stat_clients_type_memory[c->last_memory_type] -=
+            c->last_memory_usage;
 
     /* Unlink the client: this will close the socket, remove the I/O
      * handlers, and remove references of the client from different
@@ -1653,19 +1702,18 @@ void freeClient(client *c) {
         refreshGoodSlavesCount();
         /* Fire the replica change modules event. */
         if (c->replstate == SLAVE_STATE_ONLINE)
-            moduleFireServerEvent(REDISMODULE_EVENT_REPLICA_CHANGE,
-                                  REDISMODULE_SUBEVENT_REPLICA_CHANGE_OFFLINE,
+            moduleFireServerEvent(VALKEYMODULE_EVENT_REPLICA_CHANGE,
+                                  VALKEYMODULE_SUBEVENT_REPLICA_CHANGE_OFFLINE,
                                   NULL);
+        if (c->flags & CLIENT_REPL_RDB_CHANNEL) {
+            uint64_t id = htonu64(c->id);
+            raxRemove(server.slaves_waiting_psync,(unsigned char*)&id,sizeof(id),NULL);        }
     }
 
     /* Master/slave cleanup Case 2:
      * we lost the connection with the master. */
     if (c->flags & CLIENT_MASTER) replicationHandleMasterDisconnection();
 
-    /* Remove the contribution that this client gave to our
-     * incrementally computed memory usage. */
-    server.stat_clients_type_memory[c->last_memory_type] -=
-        c->last_memory_usage;
     /* Remove client from memory usage buckets */
     if (c->mem_usage_bucket) {
         c->mem_usage_bucket->mem_usage_sum -= c->last_memory_usage;
@@ -1684,14 +1732,14 @@ void freeClient(client *c) {
     zfree(c);
 }
 
-/* Schedule a client to free it at a safe time in the serverCron() function.
+/* Schedule a client to free it at a safe time in the beforeSleep() function.
  * This function is useful when we need to terminate a client but we are in
  * a context where calling freeClient() is not possible, because the client
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
     /* We need to handle concurrent access to the server.clients_to_close list
      * only in the freeClientAsync() function, since it's the only function that
-     * may access the list while Redis uses I/O threads. All the other accesses
+     * may access the list while the server uses I/O threads. All the other accesses
      * are in the context of the main thread while the other threads are
      * idle. */
     if (c->flags & CLIENT_CLOSE_ASAP || c->flags & CLIENT_SCRIPT) return;
@@ -1762,6 +1810,18 @@ int freeClientsInAsyncFreeQueue(void) {
     while ((ln = listNext(&li)) != NULL) {
         client *c = listNodeValue(ln);
 
+        if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
+            /* Check if we can remove RDB connection protection. */
+            if (!c->rdb_client_disconnect_time) {
+                c->rdb_client_disconnect_time = server.unixtime;
+                continue;
+            }
+            if (server.unixtime - c->rdb_client_disconnect_time > server.wait_before_rdb_client_free) {
+                serverLog(LL_NOTICE, "Replica main connection failed to establish PSYNC within the grace period (%ld seconds). Freeing RDB client %llu.", (long int)(server.unixtime - c->rdb_client_disconnect_time), (unsigned long long)c->id);
+                c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
+            }
+        }
+
         if (c->flags & CLIENT_PROTECTED) continue;
 
         c->flags &= ~CLIENT_CLOSE_ASAP;
@@ -1777,8 +1837,18 @@ int freeClientsInAsyncFreeQueue(void) {
  * are not registered clients. */
 client *lookupClientByID(uint64_t id) {
     id = htonu64(id);
-    client *c = raxFind(server.clients_index,(unsigned char*)&id,sizeof(id));
-    return (c == raxNotFound) ? NULL : c;
+    void *c = NULL;
+    raxFind(server.clients_index,(unsigned char*)&id,sizeof(id),&c);
+    return c;
+}
+
+/* Return a client by ID, or NULL if the client ID is not in the set
+ * of slaves waiting psync clients. */
+client *lookupRdbClientByID(uint64_t id) {
+    id = htonu64(id);
+    void *c = NULL;
+    raxFind(server.slaves_waiting_psync,(unsigned char*)&id,sizeof(id),&c);
+    return c;
 }
 
 /* This function should be called from _writeToClient when the reply list is not empty,
@@ -1787,8 +1857,9 @@ client *lookupClientByID(uint64_t id) {
  * and 'nwritten' is an output parameter, it means how many bytes server write
  * to client. */
 static int _writevToClient(client *c, ssize_t *nwritten) {
-    struct iovec iov[IOV_MAX];
     int iovcnt = 0;
+    int iovmax = min(IOV_MAX, c->conn->iovcnt);
+    struct iovec iov[iovmax];
     size_t iov_bytes_len = 0;
     /* If the static reply buffer is not empty, 
      * add it to the iov array for writev() as well. */
@@ -1804,7 +1875,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     listNode *next;
     clientReplyBlock *o;
     listRewind(c->reply, &iter);
-    while ((next = listNext(&iter)) && iovcnt < IOV_MAX && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
+    while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
         o = listNodeValue(next);
         if (o->used == 0) { /* empty node, just release it and skip. */
             c->reply_bytes -= o->size;
@@ -2035,7 +2106,7 @@ int handleClientsWithPendingWrites(void) {
 
 /* resetClient prepare the client to process the next command */
 void resetClient(client *c) {
-    redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
+    serverCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
     freeClientArgv(c);
     c->cur_script = NULL;
@@ -2155,7 +2226,7 @@ int processInlineBuffer(client *c) {
         c->repl_ack_time = server.unixtime;
 
     /* Masters should never send us inline protocol to run actual
-     * commands. If this happens, it is likely due to a bug in Redis where
+     * commands. If this happens, it is likely due to a bug in the server where
      * we got some desynchronization in the protocol, for example
      * because of a PSYNC gone bad.
      *
@@ -2179,7 +2250,7 @@ int processInlineBuffer(client *c) {
         c->argv_len_sum = 0;
     }
 
-    /* Create redis objects for all arguments. */
+    /* Create an Object for all arguments. */
     for (c->argc = 0, j = 0; j < argc; j++) {
         c->argv[c->argc] = createObject(OBJ_STRING,argv[j]);
         c->argc++;
@@ -2450,7 +2521,7 @@ int processCommandAndResetClient(client *c) {
         commandProcessed(c);
         /* Update the client's memory to include output buffer growth following the
          * processed command. */
-        updateClientMemUsageAndBucket(c);
+        if (c->conn) updateClientMemUsageAndBucket(c);
     }
 
     if (server.current_client == NULL) deadclient = 1;
@@ -2601,6 +2672,9 @@ void readQueryFromClient(connection *conn) {
     int nread, big_arg = 0;
     size_t qblen, readlen;
 
+    /* If the replica RDB client is marked as closed ASAP, do not try to read from it */
+    if ((c->flags & CLIENT_CLOSE_ASAP) && (c->flags & CLIENT_PROTECTED_RDB_CHANNEL)) return;
+
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
     if (postponeClientRead(c)) return;
@@ -2614,7 +2688,7 @@ void readQueryFromClient(connection *conn) {
      * buffer contains exactly the SDS string representing the object, even
      * at the risk of requiring more read(2) calls. This way the function
      * processMultiBulkBuffer() can avoid copying buffers to create the
-     * Redis Object representing the argument. */
+     * robj representing the argument. */
     if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
         && c->bulklen >= PROTO_MBULK_BIG_ARG)
     {
@@ -2662,6 +2736,9 @@ void readQueryFromClient(connection *conn) {
         if (server.verbosity <= LL_VERBOSE) {
             sds info = catClientInfoString(sdsempty(), c);
             serverLog(LL_VERBOSE, "Client closed connection %s", info);
+            if (c->flags & CLIENT_PROTECTED_RDB_CHANNEL) {
+                serverLog(LL_VERBOSE, "Postpone RDB client (%llu) free for %d seconds", (unsigned long long)c->id, server.wait_before_rdb_client_free);
+            }
             sdsfree(info);
         }
         freeClientAsync(c);
@@ -2680,7 +2757,13 @@ void readQueryFromClient(connection *conn) {
         atomicIncr(server.stat_net_input_bytes, nread);
     }
 
-    if (!(c->flags & CLIENT_MASTER) && sdslen(c->querybuf) > server.client_max_querybuf_len) {
+    if (!(c->flags & CLIENT_MASTER) &&
+        /* The commands cached in the MULTI/EXEC queue have not been executed yet,
+         * so they are also considered a part of the query buffer in a broader sense.
+         *
+         * For unauthenticated clients, the query buffer cannot exceed 1MB at most. */
+        (c->mstate.argv_len_sums + sdslen(c->querybuf) > server.client_max_querybuf_len ||
+         (c->mstate.argv_len_sums + sdslen(c->querybuf) > 1024*1024 && authRequired(c)))) {
         sds ci = catClientInfoString(sdsempty(),c), bytes = sdsempty();
 
         bytes = sdscatrepr(bytes,c->querybuf,64);
@@ -2688,6 +2771,7 @@ void readQueryFromClient(connection *conn) {
         sdsfree(ci);
         sdsfree(bytes);
         freeClientAsync(c);
+        atomicIncr(server.stat_client_qbuf_limit_disconnections, 1);
         goto done;
     }
 
@@ -2700,7 +2784,7 @@ done:
     beforeNextClient(c);
 }
 
-/* A Redis "Address String" is a colon separated ip:port pair.
+/* An "Address String" is a colon separated ip:port pair.
  * For IPv4 it's in the form x.y.z.k:port, example: "127.0.0.1:1234".
  * For IPv6 addresses we use [] around the IP part, like in "[::1]:1234".
  * For Unix sockets we use path:0, like in "/tmp/redis:0".
@@ -2797,39 +2881,38 @@ sds catClientInfoString(sds s, client *client) {
         used_blocks_of_repl_buf = last->id - cur->id + 1;
     }
 
-    sds ret = sdscatfmt(s,
-        "id=%U addr=%s laddr=%s %s name=%s age=%I idle=%I flags=%s db=%i sub=%i psub=%i ssub=%i multi=%i qbuf=%U qbuf-free=%U argv-mem=%U multi-mem=%U rbs=%U rbp=%U obl=%U oll=%U omem=%U tot-mem=%U events=%s cmd=%s user=%s redir=%I resp=%i lib-name=%s lib-ver=%s",
-        (unsigned long long) client->id,
-        getClientPeerId(client),
-        getClientSockname(client),
-        connGetInfo(client->conn, conninfo, sizeof(conninfo)),
-        client->name ? (char*)client->name->ptr : "",
-        (long long)(server.unixtime - client->ctime),
-        (long long)(server.unixtime - client->lastinteraction),
-        flags,
-        client->db->id,
-        (int) dictSize(client->pubsub_channels),
-        (int) listLength(client->pubsub_patterns),
-        (int) dictSize(client->pubsubshard_channels),
-        (client->flags & CLIENT_MULTI) ? client->mstate.count : -1,
-        (unsigned long long) sdslen(client->querybuf),
-        (unsigned long long) sdsavail(client->querybuf),
-        (unsigned long long) client->argv_len_sum,
-        (unsigned long long) client->mstate.argv_len_sums,
-        (unsigned long long) client->buf_usable_size,
-        (unsigned long long) client->buf_peak,
-        (unsigned long long) client->bufpos,
-        (unsigned long long) listLength(client->reply) + used_blocks_of_repl_buf,
-        (unsigned long long) obufmem, /* should not include client->buf since we want to see 0 for static clients. */
-        (unsigned long long) total_mem,
-        events,
-        client->lastcmd ? client->lastcmd->fullname : "NULL",
-        client->user ? client->user->name : "(superuser)",
-        (client->flags & CLIENT_TRACKING) ? (long long) client->client_tracking_redirection : -1,
-        client->resp,
-        client->lib_name ? (char*)client->lib_name->ptr : "",
-        client->lib_ver ? (char*)client->lib_ver->ptr : ""
-        );
+    sds ret = sdscatfmt(s, FMTARGS(
+        "id=%U", (unsigned long long) client->id,
+        " addr=%s", getClientPeerId(client),
+        " laddr=%s", getClientSockname(client),
+        " %s", connGetInfo(client->conn, conninfo, sizeof(conninfo)),
+        " name=%s", client->name ? (char*)client->name->ptr : "",
+        " age=%I", (long long)(commandTimeSnapshot() / 1000 - client->ctime),
+        " idle=%I", (long long)(server.unixtime - client->lastinteraction),
+        " flags=%s", flags,
+        " db=%i", client->db->id,
+        " sub=%i", (int) dictSize(client->pubsub_channels),
+        " psub=%i", (int) dictSize(client->pubsub_patterns),
+        " ssub=%i", (int) dictSize(client->pubsubshard_channels),
+        " multi=%i", (client->flags & CLIENT_MULTI) ? client->mstate.count : -1,
+        " watch=%i", (int) listLength(client->watched_keys),
+        " qbuf=%U", (unsigned long long) sdslen(client->querybuf),
+        " qbuf-free=%U", (unsigned long long) sdsavail(client->querybuf),
+        " argv-mem=%U", (unsigned long long) client->argv_len_sum,
+        " multi-mem=%U", (unsigned long long) client->mstate.argv_len_sums,
+        " rbs=%U", (unsigned long long) client->buf_usable_size,
+        " rbp=%U", (unsigned long long) client->buf_peak,
+        " obl=%U", (unsigned long long) client->bufpos,
+        " oll=%U", (unsigned long long) listLength(client->reply) + used_blocks_of_repl_buf,
+        " omem=%U", (unsigned long long) obufmem, /* should not include client->buf since we want to see 0 for static clients. */
+        " tot-mem=%U", (unsigned long long) total_mem,
+        " events=%s", events,
+        " cmd=%s", client->lastcmd ? client->lastcmd->fullname : "NULL",
+        " user=%s", client->user ? client->user->name : "(superuser)",
+        " redir=%I", (client->flags & CLIENT_TRACKING) ? (long long) client->client_tracking_redirection : -1,
+        " resp=%i", client->resp,
+        " lib-name=%s", client->lib_name ? (char*)client->lib_name->ptr : "",
+        " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : ""));
     return ret;
 }
 
@@ -2997,6 +3080,10 @@ void clientCommand(client *c) {
 "      Kill connections authenticated by <username>.",
 "    * SKIPME (YES|NO)",
 "      Skip killing current connection (default: yes).",
+"    * ID <client-id>",
+"      Kill connections by client id.",
+"    * MAXAGE <maxage>",
+"      Kill connections older than the specified age.",
 "LIST [options ...]",
 "    Return information about client connections. Options:",
 "    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)",
@@ -3108,6 +3195,7 @@ NULL
         user *user = NULL;
         int type = -1;
         uint64_t id = 0;
+        long long max_age = 0;
         int skipme = 1;
         int killed = 0, close_this_client = 0;
 
@@ -3129,6 +3217,18 @@ NULL
                                                       "client-id should be greater than 0") != C_OK)
                         return;
                     id = tmp;
+                } else if (!strcasecmp(c->argv[i]->ptr,"maxage") && moreargs) {
+                    long long tmp;
+
+                    if (getLongLongFromObjectOrReply(c, c->argv[i+1], &tmp,
+                                                     "maxage is not an integer or out of range") != C_OK)
+                        return;
+                    if (tmp <= 0) {
+                        addReplyError(c, "maxage should be greater than 0");
+                        return;
+                    }
+
+                    max_age = tmp;
                 } else if (!strcasecmp(c->argv[i]->ptr,"type") && moreargs) {
                     type = getClientTypeByName(c->argv[i+1]->ptr);
                     if (type == -1) {
@@ -3178,6 +3278,7 @@ NULL
             if (id != 0 && client->id != id) continue;
             if (user && client->user != user) continue;
             if (c == client && skipme) continue;
+            if (max_age != 0 && (long long)(commandTimeSnapshot() / 1000 - client->ctime) < max_age) continue;
 
             /* Kill it. */
             if (c == client) {
@@ -3586,7 +3687,7 @@ void helloCommand(client *c) {
     addReplyBulkCString(c,"redis");
 
     addReplyBulkCString(c,"version");
-    addReplyBulkCString(c,REDIS_VERSION);
+    addReplyBulkCString(c,VALKEY_VERSION);
 
     addReplyBulkCString(c,"proto");
     addReplyLongLong(c,c->resp);
@@ -3610,11 +3711,11 @@ void helloCommand(client *c) {
 
 /* This callback is bound to POST and "Host:" command names. Those are not
  * really commands, but are used in security attacks in order to talk to
- * Redis instances via HTTP, with a technique called "cross protocol scripting"
- * which exploits the fact that services like Redis will discard invalid
+ * instances via HTTP, with a technique called "cross protocol scripting"
+ * which exploits the fact that services like this server will discard invalid
  * HTTP headers and will process what follows.
  *
- * As a protection against this attack, Redis will terminate the connection
+ * As a protection against this attack, the server will terminate the connection
  * when a POST or "Host:" header is seen, and will log the event from
  * time to time (to avoid creating a DOS as a result of too many logs). */
 void securityWarningCommand(client *c) {
@@ -3736,7 +3837,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
     }
 }
 
-/* This function returns the number of bytes that Redis is
+/* This function returns the number of bytes that the server is
  * using to store the reply still not read by the client.
  *
  * Note: this function is very fast so can be called as many time as
@@ -3791,7 +3892,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
  * classes of clients.
  *
  * The function will return one of the following:
- * CLIENT_TYPE_NORMAL -> Normal client
+ * CLIENT_TYPE_NORMAL -> Normal client, including MONITOR
  * CLIENT_TYPE_SLAVE  -> Slave
  * CLIENT_TYPE_PUBSUB -> Client subscribed to Pub/Sub channels
  * CLIENT_TYPE_MASTER -> The client representing our replication master.
@@ -3896,10 +3997,11 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
     if ((c->reply_bytes == 0 && getClientType(c) != CLIENT_TYPE_SLAVE) ||
-        c->flags & CLIENT_CLOSE_ASAP) return 0;
+        (c->flags & CLIENT_CLOSE_ASAP && !(c->flags & CLIENT_PROTECTED_RDB_CHANNEL))) return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);
-
+        /* Remove RDB connection protection on COB overrun */
+        c->flags &= ~CLIENT_PROTECTED_RDB_CHANNEL;
         if (async) {
             freeClientAsync(c);
             serverLog(LL_WARNING,
@@ -3912,6 +4014,7 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
                       client);
         }
         sdsfree(client);
+        server.stat_client_outbuf_limit_disconnections++;
         return  1;
     }
     return 0;
@@ -3945,7 +4048,9 @@ void flushSlavesOutputBuffers(void) {
          *
          * 3. Obviously if the slave is not ONLINE.
          */
-        if (slave->replstate == SLAVE_STATE_ONLINE &&
+        if ((slave->replstate == SLAVE_STATE_ONLINE ||
+            slave->replstate == SLAVE_STATE_BG_RDB_LOAD) &&
+            !(slave->flags & CLIENT_CLOSE_ASAP) &&
             can_receive_writes &&
             !slave->repl_start_cmd_stream_on_ack &&
             clientHasPendingReplies(slave))
@@ -3981,7 +4086,7 @@ void updatePausedActions(void) {
 
 /* Unblock all paused clients (ones that where blocked by BLOCKED_POSTPONE (possibly in processCommand).
  * This means they'll get re-processed in beforeSleep, and may get paused again if needed. */
-void unblockPostponedClients() {
+void unblockPostponedClients(void) {
     listNode *ln;
     listIter li;
     listRewind(server.postponed_clients, &li);
@@ -4017,7 +4122,7 @@ static void pauseClientsByClient(mstime_t endTime, int isPauseClientAll) {
  * so that a failover without data loss to occur. Replicas will continue to receive
  * traffic to facilitate this functionality.
  * 
- * This function is also internally used by Redis Cluster for the manual
+ * This function is also internally used by Cluster for the manual
  * failover procedure implemented by CLUSTER FAILOVER.
  *
  * The function always succeed, even if there is already a pause in progress.
@@ -4061,7 +4166,7 @@ uint32_t isPausedActionsWithUpdate(uint32_t actions_bitmask) {
     return (server.paused_actions & actions_bitmask);
 }
 
-/* This function is called by Redis in order to process a few events from
+/* This function is called by the server in order to process a few events from
  * time to time while blocked into some not interruptible operation.
  * This allows to reply to clients with the -LOADING error while loading the
  * data set at startup or after a full resynchronization with the master
@@ -4129,7 +4234,7 @@ void processEventsWhileBlocked(void) {
 #endif
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
-    redisAtomic unsigned long value;
+    serverAtomic unsigned long value;
 } threads_pending;
 
 pthread_t io_threads[IO_THREADS_MAX_NUM];
@@ -4160,7 +4265,7 @@ void *IOThreadMain(void *myid) {
 
     snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
     redis_set_thread_title(thdname);
-    redisSetCpuAffinity(server.server_cpulist);
+    serverSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
 
     while(1) {

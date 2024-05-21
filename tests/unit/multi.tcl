@@ -68,7 +68,7 @@ start_server {tags {"multi"}} {
     } {0 0}
 
     test {EXEC fails if there are errors while queueing commands #2} {
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         r del foo1{t} foo2{t}
         r multi
         r set foo1{t} bar1
@@ -523,7 +523,7 @@ start_server {tags {"multi"}} {
     } {OK} {needs:repl cluster:skip}
 
     test {DISCARD should not fail during OOM} {
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd config set maxmemory 1
         assert  {[$rd read] eq {OK}}
         r multi
@@ -539,7 +539,7 @@ start_server {tags {"multi"}} {
     test {MULTI and script timeout} {
         # check that if MULTI arrives during timeout, it is either refused, or
         # allowed to pass, and we don't end up executing half of the transaction
-        set rd1 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
         set r2 [redis_client]
         r config set lua-time-limit 10
         r set xx 1
@@ -553,7 +553,7 @@ start_server {tags {"multi"}} {
         catch { $r2 exec; } e
         assert_match {EXECABORT*previous errors*} $e
         set xx [r get xx]
-        # make sure that either the whole transcation passed or none of it (we actually expect none)
+        # make sure that either the whole transaction passed or none of it (we actually expect none)
         assert { $xx == 1 || $xx == 3}
         # check that the connection is no longer in multi state
         set pong [$r2 ping asdf]
@@ -564,7 +564,7 @@ start_server {tags {"multi"}} {
     test {EXEC and script timeout} {
         # check that if EXEC arrives during timeout, we don't end up executing
         # half of the transaction, and also that we exit the multi state
-        set rd1 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
         set r2 [redis_client]
         r config set lua-time-limit 10
         r set xx 1
@@ -578,7 +578,7 @@ start_server {tags {"multi"}} {
         r script kill
         after 200 ; # Give some time to Lua to call the hook again...
         set xx [r get xx]
-        # make sure that either the whole transcation passed or none of it (we actually expect none)
+        # make sure that either the whole transaction passed or none of it (we actually expect none)
         assert { $xx == 1 || $xx == 3}
         # check that the connection is no longer in multi state
         set pong [$r2 ping asdf]
@@ -589,7 +589,7 @@ start_server {tags {"multi"}} {
     test {MULTI-EXEC body and script timeout} {
         # check that we don't run an incomplete transaction due to some commands
         # arriving during busy script
-        set rd1 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
         set r2 [redis_client]
         r config set lua-time-limit 10
         r set xx 1
@@ -603,7 +603,7 @@ start_server {tags {"multi"}} {
         catch { $r2 exec; } e
         assert_match {EXECABORT*previous errors*} $e
         set xx [r get xx]
-        # make sure that either the whole transcation passed or none of it (we actually expect none)
+        # make sure that either the whole transaction passed or none of it (we actually expect none)
         assert { $xx == 1 || $xx == 3}
         # check that the connection is no longer in multi state
         set pong [$r2 ping asdf]
@@ -614,7 +614,7 @@ start_server {tags {"multi"}} {
     test {just EXEC and script timeout} {
         # check that if EXEC arrives during timeout, we don't end up executing
         # actual commands during busy script, and also that we exit the multi state
-        set rd1 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
         set r2 [redis_client]
         r config set lua-time-limit 10
         r set xx 1
@@ -825,7 +825,9 @@ start_server {tags {"multi"}} {
                 {multi}
                 {xclaim *}
                 {xclaim *}
+                {xgroup SETID * ENTRIESREAD *}
                 {xclaim *}
+                {xgroup SETID * ENTRIESREAD *}
                 {exec}
             }
             close_replication_stream $repl
@@ -881,7 +883,7 @@ start_server {tags {"multi"}} {
         r set foo bar
         r config set maxmemory bla
 
-        # letting the redis parser read it, it'll throw an exception instead of
+        # letting the server parser read it, it'll throw an exception instead of
         # reply with an array that contains an error, so we switch to reading
         # raw RESP instead
         r readraw 1
@@ -891,14 +893,14 @@ start_server {tags {"multi"}} {
         set res [r read]
         assert_equal $res "+OK"
         set res [r read]
-        r readraw 1
+        r readraw 0
         set _ $res
     } {*CONFIG SET failed*}
     
     test "Flushall while watching several keys by one client" {
         r flushall
-        r mset a a b b
-        r watch b a
+        r mset a{t} a b{t} b
+        r watch b{t} a{t}
         r flushall
         r ping
      }

@@ -32,11 +32,12 @@
 #include "server.h"
 #include "pqsort.h" /* Partial qsort for SORT+LIMIT */
 #include <math.h> /* isnan() */
+#include "cluster.h"
 
 zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank);
 
-redisSortOperation *createSortOperation(int type, robj *pattern) {
-    redisSortOperation *so = zmalloc(sizeof(*so));
+serverSortOperation *createSortOperation(int type, robj *pattern) {
+    serverSortOperation *so = zmalloc(sizeof(*so));
     so->type = type;
     so->pattern = pattern;
     return so;
@@ -58,7 +59,7 @@ redisSortOperation *createSortOperation(int type, robj *pattern) {
  *
  * The returned object will always have its refcount increased by 1
  * when it is non-NULL. */
-robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
+robj *lookupKeyByPattern(serverDb *db, robj *pattern, robj *subst) {
     char *p, *f, *k;
     sds spat, ssub;
     robj *keyobj, *fieldobj = NULL, *o;
@@ -136,7 +137,7 @@ noobj:
  * the additional parameter is not standard but a BSD-specific we have to
  * pass sorting parameters via the global 'server' structure */
 int sortCompare(const void *s1, const void *s2) {
-    const redisSortObject *so1 = s1, *so2 = s2;
+    const serverSortObject *so1 = s1, *so2 = s2;
     int cmp;
 
     if (!server.sort_alpha) {
@@ -184,7 +185,7 @@ int sortCompare(const void *s1, const void *s2) {
     return server.sort_desc ? -cmp : cmp;
 }
 
-/* The SORT command is the most complex command in Redis. Warning: this code
+/* The SORT command is the most complex command in the server. Warning: this code
  * is optimized for speed and a bit less for readability */
 void sortCommandGeneric(client *c, int readonly) {
     list *operations;
@@ -196,7 +197,7 @@ void sortCommandGeneric(client *c, int readonly) {
     int int_conversion_error = 0;
     int syntax_error = 0;
     robj *sortval, *sortby = NULL, *storekey = NULL;
-    redisSortObject *vector; /* Resulting vector to sort */
+    serverSortObject *vector; /* Resulting vector to sort */
     int user_has_full_key_access = 0; /* ACL - used in order to verify 'get' and 'by' options can be used */
     /* Create a list of operations to perform for every sorted element.
      * Operations can be GET */
@@ -235,10 +236,12 @@ void sortCommandGeneric(client *c, int readonly) {
             if (strchr(c->argv[j+1]->ptr,'*') == NULL) {
                 dontsort = 1;
             } else {
-                /* If BY is specified with a real pattern, we can't accept
-                 * it in cluster mode. */
-                if (server.cluster_enabled) {
-                    addReplyError(c,"BY option of SORT denied in Cluster mode.");
+                /* If BY is specified with a real pattern, we can't accept it in cluster mode,
+                 * unless we can make sure the keys formed by the pattern are in the same slot 
+                 * as the key to sort. */
+                if (server.cluster_enabled && patternHashSlot(sortby->ptr, sdslen(sortby->ptr)) != getKeySlot(c->argv[1]->ptr)) {
+                    addReplyError(c, "BY option of SORT denied in Cluster mode when "
+                                 "keys formed by the pattern may be in different slots.");
                     syntax_error++;
                     break;
                 }
@@ -252,8 +255,12 @@ void sortCommandGeneric(client *c, int readonly) {
             }
             j++;
         } else if (!strcasecmp(c->argv[j]->ptr,"get") && leftargs >= 1) {
-            if (server.cluster_enabled) {
-                addReplyError(c,"GET option of SORT denied in Cluster mode.");
+            /* If GET is specified with a real pattern, we can't accept it in cluster mode,
+             * unless we can make sure the keys formed by the pattern are in the same slot 
+             * as the key to sort. */
+            if (server.cluster_enabled && patternHashSlot(c->argv[j+1]->ptr, sdslen(c->argv[j+1]->ptr)) != getKeySlot(c->argv[1]->ptr)) {
+                addReplyError(c, "GET option of SORT denied in Cluster mode when "
+                              "keys formed by the pattern may be in different slots.");
                 syntax_error++;
                 break;
             }
@@ -297,8 +304,7 @@ void sortCommandGeneric(client *c, int readonly) {
     if (sortval)
         incrRefCount(sortval);
     else
-        sortval = createQuicklistObject();
-
+        sortval = createQuicklistObject(server.list_max_listpack_size, server.list_compress_depth);
 
     /* When sorting a set with no sort specified, we must sort the output
      * so the result is consistent across scripting and replication.
@@ -357,7 +363,7 @@ void sortCommandGeneric(client *c, int readonly) {
     }
 
     /* Load the sorting vector with all the objects to sort */
-    vector = zmalloc(sizeof(redisSortObject)*vectorlen);
+    vector = zmalloc(sizeof(serverSortObject)*vectorlen);
     j = 0;
 
     if (sortval->type == OBJ_LIST && dontsort) {
@@ -510,9 +516,9 @@ void sortCommandGeneric(client *c, int readonly) {
         server.sort_bypattern = sortby ? 1 : 0;
         server.sort_store = storekey ? 1 : 0;
         if (sortby && (start != 0 || end != vectorlen-1))
-            pqsort(vector,vectorlen,sizeof(redisSortObject),sortCompare, start,end);
+            pqsort(vector,vectorlen,sizeof(serverSortObject),sortCompare, start,end);
         else
-            qsort(vector,vectorlen,sizeof(redisSortObject),sortCompare);
+            qsort(vector,vectorlen,sizeof(serverSortObject),sortCompare);
     }
 
     /* Send command output to the output buffer, performing the specified
@@ -530,7 +536,7 @@ void sortCommandGeneric(client *c, int readonly) {
             if (!getop) addReplyBulk(c,vector[j].obj);
             listRewind(operations,&li);
             while((ln = listNext(&li))) {
-                redisSortOperation *sop = ln->value;
+                serverSortOperation *sop = ln->value;
                 robj *val = lookupKeyByPattern(c->db,sop->pattern,
                                                vector[j].obj);
 
@@ -550,7 +556,7 @@ void sortCommandGeneric(client *c, int readonly) {
     } else {
         /* We can't predict the size and encoding of the stored list, we
          * assume it's a large list and then convert it at the end if needed. */
-        robj *sobj = createQuicklistObject();
+        robj *sobj = createQuicklistObject(server.list_max_listpack_size, server.list_compress_depth);
 
         /* STORE option specified, set the sorting result as a List object */
         for (j = start; j <= end; j++) {
@@ -562,7 +568,7 @@ void sortCommandGeneric(client *c, int readonly) {
             } else {
                 listRewind(operations,&li);
                 while((ln = listNext(&li))) {
-                    redisSortOperation *sop = ln->value;
+                    serverSortOperation *sop = ln->value;
                     robj *val = lookupKeyByPattern(c->db,sop->pattern,
                                                    vector[j].obj);
 

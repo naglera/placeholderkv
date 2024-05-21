@@ -4,8 +4,8 @@ start_server {tags {"modules"}} {
     r module load $testmodule
 
     test "Module client blocked on keys: Circular BPOPPUSH" {
-        set rd1 [redis_deferring_client]
-        set rd2 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
+        set rd2 [valkey_deferring_client]
 
         r del src dst
 
@@ -23,7 +23,7 @@ start_server {tags {"modules"}} {
     }
 
     test "Module client blocked on keys: Self-referential BPOPPUSH" {
-        set rd1 [redis_deferring_client]
+        set rd1 [valkey_deferring_client]
 
         r del src
 
@@ -34,6 +34,31 @@ start_server {tags {"modules"}} {
         assert_equal {42} [r fsl.getall src]
     }
 
+    test "Module client blocked on keys: BPOPPUSH unblocked by timer" {
+        set rd1 [valkey_deferring_client]
+
+        r del src dst
+
+        set repl [attach_to_replication_stream]
+
+        $rd1 fsl.bpoppush src dst 0
+        wait_for_blocked_clients_count 1
+
+        r fsl.pushtimer src 9000 10
+        wait_for_blocked_clients_count 0
+
+        assert_equal {9000} [r fsl.getall dst]
+        assert_equal {} [r fsl.getall src]
+
+        assert_replication_stream $repl {
+            {select *}
+            {fsl.push src 9000}
+            {fsl.bpoppush src dst 0}
+        }
+
+        close_replication_stream $repl
+    } {} {needs:repl}
+
     test {Module client blocked on keys (no metadata): No block} {
         r del k
         r fsl.push k 33
@@ -43,14 +68,14 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys (no metadata): Timeout} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpop k 1
         assert_equal {Request timedout} [$rd read]
     }
 
     test {Module client blocked on keys (no metadata): Blocked} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpop k 0
         wait_for_blocked_clients_count 1
         r fsl.push k 34
@@ -65,7 +90,7 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys (with metadata): Timeout} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         r fsl.push k 33
@@ -76,7 +101,7 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys (with metadata): Blocked, case 1} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         r fsl.push k 33
@@ -90,7 +115,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, case 2} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r fsl.push k 33
@@ -103,7 +128,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, DEL} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r del k
@@ -113,7 +138,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, FLUSHALL} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r flushall
@@ -124,7 +149,7 @@ start_server {tags {"modules"}} {
         r select 9
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r swapdb 0 9
@@ -139,7 +164,7 @@ start_server {tags {"modules"}} {
         r select 0
         r lpush k 38
         r select 9
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r swapdb 0 9
@@ -155,7 +180,7 @@ start_server {tags {"modules"}} {
         r select 0
         r fsl.push k 34
         r select 9
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r swapdb 0 9
@@ -173,7 +198,7 @@ start_server {tags {"modules"}} {
         r select 0
         r fsl.push k 38
         r select 9
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpopgt k 35 0
         wait_for_blocked_clients_count 1
         r swapdb 0 9
@@ -184,7 +209,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, CLIENT KILL} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         $rd fsl.bpopgt k 35 0
@@ -195,7 +220,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, CLIENT UNBLOCK TIMEOUT} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         $rd fsl.bpopgt k 35 0
@@ -207,7 +232,7 @@ start_server {tags {"modules"}} {
     test {Module client blocked on keys (with metadata): Blocked, CLIENT UNBLOCK ERROR} {
         r del k
         r fsl.push k 32
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         $rd fsl.bpopgt k 35 0
@@ -218,7 +243,7 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys, no timeout CB, CLIENT UNBLOCK TIMEOUT} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         $rd fsl.bpop k 0 NO_TO_CB
@@ -229,7 +254,7 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys, no timeout CB, CLIENT UNBLOCK ERROR} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd client id
         set cid [$rd read]
         $rd fsl.bpop k 0 NO_TO_CB
@@ -240,7 +265,7 @@ start_server {tags {"modules"}} {
 
     test {Module client re-blocked on keys after woke up on wrong type} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd fsl.bpop k 0
         wait_for_blocked_clients_count 1
         r lpush k 12
@@ -254,7 +279,7 @@ start_server {tags {"modules"}} {
 
     test {Module client blocked on keys woken up by LPUSH} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd blockonkeys.popall k
         wait_for_blocked_clients_count 1
         r lpush k 42 squirrel banana
@@ -264,7 +289,7 @@ start_server {tags {"modules"}} {
 
     test {Module client unblocks BLPOP} {
         r del k
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd blpop k 3
         wait_for_blocked_clients_count 1
         r blockonkeys.lpush k 42
@@ -276,7 +301,7 @@ start_server {tags {"modules"}} {
         r del k
         r lpush k aa
         # Module client blocks to pop 5 elements from list
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd blockonkeys.blpopn k 5
         wait_for_blocked_clients_count 1
         # Check that RM_SignalKeyAsReady() can wake up BLPOPN
@@ -291,7 +316,7 @@ start_server {tags {"modules"}} {
         r del k
         r set somekey someval
         # Module client blocks to pop 5 elements from list
-        set rd [redis_deferring_client]
+        set rd [valkey_deferring_client]
         $rd blockonkeys.blpopn_or_unblock k 5 0
         wait_for_blocked_clients_count 1
         # will now cause the module to trigger pop but instead will unblock the client from the reply_callback
@@ -303,4 +328,39 @@ start_server {tags {"modules"}} {
         assert_equal {someval} [$rd read]
         $rd close
     }
+
+    set master [srv 0 client]
+    set master_host [srv 0 host]
+    set master_port [srv 0 port]
+    start_server [list overrides [list loadmodule "$testmodule"]] {
+        set replica [srv 0 client]
+        set replica_host [srv 0 host]
+        set replica_port [srv 0 port]
+
+        # Start the replication process...
+        $replica replicaof $master_host $master_port
+        wait_for_sync $replica
+
+        test {WAIT command on module blocked client on keys} {
+            set rd [valkey_deferring_client -1]
+            $rd set x y
+            $rd read
+
+            pause_process [srv 0 pid]
+
+            $master del k
+            $rd fsl.bpop k 0
+            wait_for_blocked_client -1
+            $master fsl.push k 34
+            $master fsl.push k 35
+            assert_equal {34} [$rd read]
+
+            assert_equal [$master wait 1 1000] 0
+            resume_process [srv 0 pid]
+            assert_equal [$master wait 1 1000] 1
+            $rd close
+            assert_equal {35} [$replica fsl.getall k]
+        }
+    }
+
 }
