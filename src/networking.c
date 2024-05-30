@@ -1620,8 +1620,13 @@ void freeClient(client *c) {
 
     /* Log link disconnection with slave */
     if (getClientType(c) == CLIENT_TYPE_SLAVE) {
-        serverLog(LL_NOTICE,"Connection with replica %s lost.",
-            replicationGetSlaveName(c));
+        if (c->flags & CLIENT_REPL_RDB_CHANNEL) {
+            serverLog(LL_NOTICE,"Replica %s rdb channel disconnected.",
+                replicationGetSlaveName(c));
+        } else {
+            serverLog(LL_NOTICE,"Connection with replica %s lost.",
+                replicationGetSlaveName(c));
+        }
     }
 
     /* Free the query buffer */
